@@ -81,13 +81,13 @@ function ask() {
     // messages.push({ role: 'assistant', content: fullResponse }); // 助手说一句，再push一条
 
     await agentLoop(model, tools, messages, SYSTEM);
-    
+
     ask(); // 递归调用
   });
 }
 
 // console.log('Super Agent v0.1 (type "exit" to quit)\n');
-console.log('Super Agent v0.2 — Agent Loop (type "exit" to quit)\n');
+// console.log('Super Agent v0.2 — Agent Loop (type "exit" to quit)\n');
 ask();
 
 // async function main() {
