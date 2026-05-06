@@ -117,7 +117,7 @@ export async function agentLoop(
       break;
     }
 
-    console.log('  \u2192 继续下一步...');
+    console.log('  → 继续下一步...');
   }
 
   if (step >= MAX_STEPS) {
