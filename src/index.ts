@@ -5,6 +5,8 @@ import { createMockModel } from './mock-model';
 import { createInterface } from 'node:readline';
 import { weatherTool, calculatorTool } from './tools';
 import { agentLoop } from './agent-loop';
+import { allTools } from './tools.js';
+import { ToolRegistry } from './tool-registry.js';
 
 const qwen = createOpenAI({
   baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -19,6 +21,18 @@ const rl = createInterface({
   input: process.stdin,
   output: process.stdout,
 });
+
+const registry = new ToolRegistry();
+registry.register(...allTools);
+
+console.log(`已注册 ${registry.getAll().length} 个工具：`);
+for (const tool of registry.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? '可并发' : '串行',
+    tool.isReadOnly ? '只读' : '读写',
+  ].join(', ');
+  console.log(`  - ${tool.name}（${flags}）`);
+}
 
 const messages: ModelMessage[] = []; // 维护一个消息列表，记录对话历史
 const tools = [weatherTool, calculatorTool]; // 维护一个工具列表，记录可用工具
@@ -80,7 +94,7 @@ function ask() {
 
     // messages.push({ role: 'assistant', content: fullResponse }); // 助手说一句，再push一条
 
-    await agentLoop(model, tools, messages, SYSTEM);
+    await agentLoop(model, registry, messages, SYSTEM);
 
     ask(); // 递归调用
   });
