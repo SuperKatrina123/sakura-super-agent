@@ -35,7 +35,6 @@ for (const tool of registry.getAll()) {
 }
 
 const messages: ModelMessage[] = []; // 维护一个消息列表，记录对话历史
-const tools = [weatherTool, calculatorTool]; // 维护一个工具列表，记录可用工具
 
 const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。

@@ -1,13 +1,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ToolDefinition } from './tool-registry.js';
-import { jsonSchema } from 'ai';
-/**
- * 一个工具的定义，包含：
- * 1. description：工具的功能描述
- * 2. inputSchema:输入参数的 JSON Schema
- * 3. execute：工具的执行函数
-*/
+
 export const weatherTool: ToolDefinition = {
   name: 'get_weather',
   description: '查询指定城市的天气信息',
@@ -26,6 +20,9 @@ export const weatherTool: ToolDefinition = {
       '北京': '晴，15-25°C，东南风 2 级',
       '上海': '多云，18-22°C，西南风 3 级',
       '深圳': '阵雨，22-28°C，南风 2 级',
+      '广州': '多云转晴，20-28°C，东风 3 级',
+      '杭州': '晴，14-24°C，北风 2 级',
+      '成都': '阴，16-22°C，微风',
     };
     return data[city] || `${city}：暂无数据`;
   },
@@ -34,17 +31,18 @@ export const weatherTool: ToolDefinition = {
 export const calculatorTool: ToolDefinition = {
   name: 'calculator',
   description: '计算数学表达式的结果。当用户提问涉及数学运算时使用',
-  parameters: jsonSchema({
+  parameters: {
     type: 'object',
     properties: {
       expression: { type: 'string', description: '数学表达式，如 "2 + 3 * 4"' },
     },
     required: ['expression'],
     additionalProperties: false,
-  }),
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
   execute: async ({ expression }: { expression: string }) => {
     try {
-      // 生产环境不要用 eval，这里纯粹为了演示
       const result = new Function(`return ${expression}`)();
       return `${expression} = ${result}`;
     } catch {
@@ -66,15 +64,16 @@ export const readFileTool: ToolDefinition = {
   },
   isConcurrencySafe: true,
   isReadOnly: true,
-  maxResultChars: 500,  // 演示用，生产环境通常 50000+
+  maxResultChars: 500,
   execute: async ({ path }: { path: string }) => {
-    return readFileSync(resolve(path), 'utf-8');
+    const resolved = resolve(path);
+    return readFileSync(resolved, 'utf-8');
   },
 };
 
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: '写入内容到指定文件',
+  description: '写入内容到指定文件。如果文件已存在则覆盖',
   parameters: {
     type: 'object',
     properties: {
@@ -84,10 +83,11 @@ export const writeFileTool: ToolDefinition = {
     required: ['path', 'content'],
     additionalProperties: false,
   },
-  isConcurrencySafe: false,  // 写操作不能并行
+  isConcurrencySafe: false,
   isReadOnly: false,
   execute: async ({ path, content }: { path: string; content: string }) => {
-    writeFileSync(resolve(path), content, 'utf-8');
+    const resolved = resolve(path);
+    writeFileSync(resolved, content, 'utf-8');
     return `已写入 ${content.length} 字符到 ${path}`;
   },
 };
@@ -107,13 +107,22 @@ export const listDirectoryTool: ToolDefinition = {
   isReadOnly: true,
   execute: async ({ path = '.' }: { path?: string }) => {
     const resolved = resolve(path);
-    return readdirSync(resolved).map(name => {
-      const stat = statSync(join(resolved, name));
-      return `${stat.isDirectory() ? '[DIR]' : '[FILE]'} ${name}`;
+    const entries = readdirSync(resolved);
+    return entries.map(name => {
+      try {
+        const stat = statSync(join(resolved, name));
+        return `${stat.isDirectory() ? '[DIR]' : '[FILE]'} ${name}`;
+      } catch {
+        return `[?] ${name}`;
+      }
     }).join('\n');
   },
 };
 
 export const allTools: ToolDefinition[] = [
-  weatherTool, calculatorTool, readFileTool, writeFileTool, listDirectoryTool,
+  weatherTool,
+  calculatorTool,
+  readFileTool,
+  writeFileTool,
+  listDirectoryTool,
 ];
