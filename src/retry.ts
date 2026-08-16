@@ -7,11 +7,10 @@ export function isRetryable(error: unknown): boolean {
   // HTTP 状态码判断
   const statusMatch = message.match(/(\d{3})/);
   if (statusMatch) {
-  const status = parseInt(statusMatch[1]);
-  // 429, 529, 408 都是常见的速率限制或超时错误，适合重试
-  if ([429, 529, 408].includes(status)) return true;
-  if (status >= 500 && status < 600) return true;
-  if (status >= 400 && status < 500) return false;
+    const status = parseInt(statusMatch[1]);
+    if ([429, 529, 408].includes(status)) return true;
+    if (status >= 500 && status < 600) return true;
+    if (status >= 400 && status < 500) return false;
   }
 
   // 网络错误
@@ -25,8 +24,6 @@ export function isRetryable(error: unknown): boolean {
 }
 
 // --- 指数退避 + 随机抖动 ---
-// 指数退避：每次重试等待的时间成倍增加，避免频繁请求导致问题加剧
-// 随机抖动：在指数退避的基础上增加随机因素，避免多个请求同时重试造成新的高峰
 export function calculateDelay(attempt: number, baseMs = 500, maxMs = 30000): number {
   const exponential = baseMs * Math.pow(2, attempt - 1);
   const capped = Math.min(exponential, maxMs);

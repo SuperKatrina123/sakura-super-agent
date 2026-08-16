@@ -1,19 +1,24 @@
 import { streamText, type ModelMessage } from 'ai';
-import { detect, recordCall, recordResult, resetHistory } from './loop-detection.js';
-import { isRetryable, calculateDelay, sleep } from './retry.js';
+import { detect, recordCall, recordResult, resetHistory } from '../loop-detection.ts';
+import { isRetryable, calculateDelay, sleep } from '../retry.ts';
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
-const TOKEN_BUDGET = 15000;
+
+export interface BudgetState {
+  used: number;
+  limit: number;
+}
+
 
 export async function agentLoop(
   model: any,
   tools: any,
   messages: ModelMessage[],
   system: string,
+  budget: BudgetState
 ) {
   let step = 0;
-  let totalTokens = 0;
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -91,13 +96,13 @@ export async function agentLoop(
 
     messages.push(...stepResponse!.messages);
 
-    // Token 预算追踪
+    // Token 预算追踪：budget 由调用方持有，跨轮持续累计
     const inp = typeof stepUsage?.inputTokens === 'number' ? stepUsage.inputTokens : (stepUsage?.inputTokens?.total ?? 0);
     const out = typeof stepUsage?.outputTokens === 'number' ? stepUsage.outputTokens : (stepUsage?.outputTokens?.total ?? 0);
-    totalTokens += inp + out;
-    const pct = Math.round(totalTokens / TOKEN_BUDGET * 100);
-    console.log(`  [Token] ${totalTokens}/${TOKEN_BUDGET} (${pct}%)`);
-    if (totalTokens > TOKEN_BUDGET) {
+    budget.used += inp + out;
+    const pct = Math.round(budget.used / budget.limit * 100);
+    console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%)`);
+    if (budget.used > budget.limit) {
       console.log('\n[Token 预算耗尽，强制停止]');
       break;
     }

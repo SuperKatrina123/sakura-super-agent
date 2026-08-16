@@ -1,11 +1,11 @@
 import 'dotenv/config'
-import { ModelMessage } from 'ai'
+import { ModelMessage, streamText, stepCountIs } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createMockModel } from './mock-model'
 import { createInterface } from 'node:readline';
 import process from 'node:process';
 import { weatherTool, calculatorTool } from './tool/utility-tools';
-import { agentLoop, type BudgetState } from './agent/loop';
+import { agentLoop } from './agent/loop';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -16,6 +16,7 @@ const model = process.env.DEEPSEEK_API_KEY ?
     deepseek.chat('deepseek-v4-flash') 
     : createMockModel();
 
+
 const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -23,9 +24,8 @@ const rl = createInterface({
 
 const messages: ModelMessage[] = [];
 const tools = { get_weather: weatherTool, calculator: calculatorTool };
-const SYSTEM = '你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。';
-// 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
-const budget: BudgetState = { used: 0, limit: 15000 };
+
+const SYSTEM = '你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。'
 
 function ask() {
     rl.question('\nYou: ', async (input) => {
@@ -38,12 +38,11 @@ function ask() {
 
         messages.push({ role: 'user', content: trimmed });
 
-        await agentLoop(model, tools, messages, SYSTEM, budget);
+        await agentLoop(model, tools, messages, SYSTEM);
 
         ask();
     });
 };
 
 console.log('Chat with agent loop...');
-console.log('试试输入："测试死循环"、"测试重试"、"测试预算" 看三层防护效果\n');
 ask();

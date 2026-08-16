@@ -1,11 +1,5 @@
 import { jsonSchema } from 'ai';
 
-/**
- * 一个工具的定义，包含：
- * 1. description：工具的功能描述
- * 2. inputSchema:输入参数的 JSON Schema
- * 3. execute：工具的执行函数
-*/
 export const weatherTool = {
   description: '查询指定城市的天气信息',
   inputSchema: jsonSchema({
@@ -17,7 +11,7 @@ export const weatherTool = {
     additionalProperties: false,
   }),
   execute: async ({ city }: { city: string }) => {
-    // 先用假数据，后面会接真实 API
+    // 先用假数据，后面课程会接真实 API
     const mockWeather: Record<string, string> = {
       '北京': '晴，15-25°C，东南风 2 级',
       '上海': '多云，18-22°C，西南风 3 级',

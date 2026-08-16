@@ -1,67 +1,97 @@
 import { createHash } from 'node:crypto';
 
+
 export interface ToolCallRecord {
-  toolName: string;
-  argsHash: string;
-  resultHash?: string;
-  timestamp: number;
+    toolName: string;
+    argsHash: string;
+    resultHash?: string;
+    timestamp: number
 }
 
+// generic_repeat - 通用重复 ping-pong 两个操作来回 global_circuit_breaker 轮询无进展
 export type DetectorKind = 'generic_repeat' | 'ping_pong' | 'global_circuit_breaker';
 
 export type DetectionResult =
   | { stuck: false }
   | { stuck: true; level: 'warning' | 'critical'; detector: DetectorKind; count: number; message: string };
 
-const HISTORY_SIZE = 30;
-const WARNING_THRESHOLD = 5;
-const CRITICAL_THRESHOLD = 8;
-const BREAKER_THRESHOLD = 10;
+
+// 核心思路：指纹+滑动窗口
+/**
+ * 1. 给每次工具调用算指纹
+ * 2. 维护滑动窗口 30条
+ * 3. 同样的输入 + 同样的输出 = 无进展
+ * 
+ * 三级进展：
+ * 1. warning 5次 注入消息提醒
+ * 2. critical 8次 阻断工具，强制停止循环
+ * 3. 全局熔断 10次 强制停止
+*/
+
+// --- 配置 ---
+
+const HISTORY_SIZE = 30;       // 滑动窗口大小
+const WARNING_THRESHOLD = 5;   // 警告阈值（演示用，生产环境通常是 10）
+const CRITICAL_THRESHOLD = 8;  // 严重阈值（演示用，生产环境通常是 20）
+const BREAKER_THRESHOLD = 10;  // 熔断阈值（演示用，生产环境通常是 30）
+
+// -- 指纹计算
 
 function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  return `{${keys.map(k => `${JSON.stringify(k)}:${stableStringify((value as any)[k])}`).join(',')}}`;
+    if (value === null || typeof value !== 'object') {
+        return JSON.stringify(value);
+    }
+
+    if (Array.isArray(value)) {
+        return `[${value.map(stableStringify).join(',')}]`;
+    }
+    
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+
+    return `{${keys.map(k => `${JSON.stringify(k)}: ${stableStringify((value as any)[k])}`).join(',')}}`
 }
 
 function hash(input: string): string {
-  return createHash('sha256').update(input).digest('hex').slice(0, 16);
+    return createHash('sha256').update(input).digest('hex').slice(0, 16);
 }
 
 export function hashToolCall(toolName: string, params: unknown): string {
-  return `${toolName}:${hash(stableStringify(params))}`;
+    return `${toolName}:${hash(stableStringify(params))}`;
 }
 
 export function hashResult(result: unknown): string {
-  return hash(stableStringify(result));
+    return hash(stableStringify(result));
 }
+
+// --- 滑动窗口 ---
 
 const history: ToolCallRecord[] = [];
 
 export function recordCall(toolName: string, params: unknown): void {
-  history.push({
-    toolName,
-    argsHash: hashToolCall(toolName, params),
-    timestamp: Date.now(),
-  });
-  if (history.length > HISTORY_SIZE) history.shift();
+    history.push({
+        toolName,
+        argsHash: hashToolCall(toolName, params),
+        timestamp: Date.now(),
+    });
+    if (history.length > HISTORY_SIZE) history.shift();
 }
 
 export function recordResult(toolName: string, params: unknown, result: unknown): void {
-  const argsHash = hashToolCall(toolName, params);
-  const resultH = hashResult(result);
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].toolName === toolName && history[i].argsHash === argsHash && !history[i].resultHash) {
-      history[i].resultHash = resultH;
-      break;
+    const argsHash = hashToolCall(toolName, params);
+    const resultH = hashResult(result);
+    for (let i = history.length - 1; i >= 0; i--) {
+        if (history[i].toolName === toolName && history[i].argsHash === argsHash && !history[i].resultHash) {
+            history[i].resultHash = resultH;
+            break;
+        }
     }
-  }
 }
 
 export function resetHistory(): void {
-  history.length = 0;
+    history.length = 0;
 }
+
+// --- 检测器 ---
 
 function getNoProgressStreak(toolName: string, argsHash: string): number {
   let streak = 0;
@@ -94,6 +124,8 @@ function getPingPongCount(currentHash: string): number {
   if (currentHash === otherHash && count >= 2) return count + 1;
   return 0;
 }
+
+// --- 主检测函数 ---
 
 export function detect(toolName: string, params: unknown): DetectionResult {
   const argsHash = hashToolCall(toolName, params);

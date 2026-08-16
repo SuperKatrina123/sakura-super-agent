@@ -87,10 +87,20 @@ function pickTextResponse(prompt: any[]): string {
   return TEXT_RESPONSES.default;
 }
 
-const USAGE = {
-  inputTokens: { total: 3000, noCache: 3000, cacheRead: undefined, cacheWrite: undefined },
-  outputTokens: { total: 1500, text: 1500, reasoning: undefined },
-};
+function isInBudgetTestMode(prompt: any[]): boolean {
+  return (prompt || []).some((m: any) => {
+    if (m.role !== 'user') return false;
+    const text = (m.content || []).map((c: any) => c.text || '').join('').toLowerCase();
+    return text.includes('测试预算') || text.includes('test budget');
+  });
+}
+
+function makeUsage(prompt: any[]) {
+  if (isInBudgetTestMode(prompt)) {
+    return { inputTokens: 3000, outputTokens: 1500, totalTokens: 4500 };
+  }
+  return { inputTokens: 300, outputTokens: 200, totalTokens: 500 };
+}
 
 function createDelayedStream(chunks: any[], delayMs = 30): ReadableStream {
   return new ReadableStream({
@@ -131,7 +141,7 @@ export function createMockModel() {
         return {
           content: [{ type: 'text' as const, text: '重试成功！经过几次 429 错误后，我终于回来了。' }],
           finishReason: { unified: 'stop' as const, raw: undefined },
-          usage: USAGE,
+          usage: makeUsage(prompt),
           warnings: [],
         };
       }
@@ -146,7 +156,7 @@ export function createMockModel() {
             input: intent.args,
           }],
           finishReason: { unified: 'tool-calls' as const, raw: undefined },
-          usage: USAGE,
+          usage: makeUsage(prompt),
           warnings: [],
         };
       }
@@ -154,7 +164,7 @@ export function createMockModel() {
       return {
         content: [{ type: 'text' as const, text: pickTextResponse(prompt) }],
         finishReason: { unified: 'stop' as const, raw: undefined },
-        usage: USAGE,
+        usage: makeUsage(prompt),
         warnings: [],
       };
     },
@@ -174,7 +184,7 @@ export function createMockModel() {
           { type: 'text-start', id },
           ...reply.split('').map((char: string) => ({ type: 'text-delta', id, delta: char })),
           { type: 'text-end', id },
-          { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: USAGE },
+          { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: makeUsage(prompt) },
         ];
         return { stream: createDelayedStream(chunks, 30) };
       }
@@ -188,7 +198,7 @@ export function createMockModel() {
           { type: 'tool-input-delta', id: callId, delta: argsJson },
           { type: 'tool-input-end', id: callId },
           { type: 'tool-call', toolCallId: callId, toolName: intent.toolName, input: argsJson },
-          { type: 'finish', finishReason: { unified: 'tool-calls', raw: undefined }, usage: USAGE },
+          { type: 'finish', finishReason: { unified: 'tool-calls', raw: undefined }, usage: makeUsage(prompt) },
         ];
         return { stream: createDelayedStream(chunks, 20) };
       }
@@ -199,7 +209,7 @@ export function createMockModel() {
         { type: 'text-start', id },
         ...replyText.split('').map((char: string) => ({ type: 'text-delta', id, delta: char })),
         { type: 'text-end', id },
-        { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: USAGE },
+        { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: makeUsage(prompt) },
       ];
       return { stream: createDelayedStream(chunks, 30) };
     },
