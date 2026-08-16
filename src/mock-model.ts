@@ -40,6 +40,17 @@ function detectToolIntent(prompt: any[]): ToolCallIntent | null {
 
   if (hasToolResults(prompt)) return null;
 
+  // 编辑工具测试：三个分支，操作 /tmp/edit-demo.txt。注意「未找到」「多匹配」要先于「测试编辑」判断
+  if (text.includes('测试编辑未找到') || text.includes('test edit not found')) {
+    return { toolName: 'edit_file', args: { path: '/tmp/edit-demo.txt', old_string: '远古的神秘字符串', new_string: '替换' } };
+  }
+  if (text.includes('测试编辑多匹配') || text.includes('test edit multiple')) {
+    return { toolName: 'edit_file', args: { path: '/tmp/edit-demo.txt', old_string: 'Agent Loop 的循环检测', new_string: 'Agent Loop 的重复检测' } };
+  }
+  if (text.includes('测试编辑') || text.includes('test edit')) {
+    return { toolName: 'edit_file', args: { path: '/tmp/edit-demo.txt', old_string: '防止死循环', new_string: '防止死锁' } };
+  }
+
   const weatherKeywords = ['天气', 'weather', '温度', '热', '冷', '气温', '下雨', '晴'];
   const hasWeatherIntent = weatherKeywords.some((kw) => text.includes(kw));
   const cities = text.match(/(北京|上海|深圳|广州|杭州|成都)/g);
@@ -62,6 +73,21 @@ function detectToolIntent(prompt: any[]): ToolCallIntent | null {
   }
 
   return null;
+}
+
+// 并发测试：一步返回多个工具调用，混合「并发安全」和「必须串行」的工具，
+// 用来观察 ToolRegistry 读写锁的放行顺序（共享锁可并行，独占锁要等待）
+function detectConcurrencyIntent(prompt: any[]): ToolCallIntent[] | null {
+  if (hasToolResults(prompt)) return null;   // 工具已执行完，下一轮该回复文本，别重复触发
+  const text = extractUserText(prompt);
+  if (!text.includes('测试并发') && !text.includes('test concurrency')) return null;
+  return [
+    { toolName: 'get_weather', args: { city: '北京' } },
+    { toolName: 'get_weather', args: { city: '上海' } },
+    { toolName: 'read_file', args: { path: 'README.md' } },
+    { toolName: 'list_directory', args: { path: 'docs' } },
+    { toolName: 'write_file', args: { path: '/tmp/concurrency-test.txt', content: '并发测试' } },
+  ];
 }
 
 function pickTextResponse(prompt: any[]): string {
@@ -146,6 +172,21 @@ export function createMockModel() {
         };
       }
 
+      const multi = detectConcurrencyIntent(prompt);
+      if (multi) {
+        return {
+          content: multi.map((intent, i) => ({
+            type: 'tool-call' as const,
+            toolCallId: `call-${Date.now()}-${i}`,
+            toolName: intent.toolName,
+            input: intent.args,
+          })),
+          finishReason: { unified: 'tool-calls' as const, raw: undefined },
+          usage: makeUsage(prompt),
+          warnings: [],
+        };
+      }
+
       const intent = detectToolIntent(prompt);
       if (intent) {
         return {
@@ -187,6 +228,23 @@ export function createMockModel() {
           { type: 'finish', finishReason: { unified: 'stop', raw: undefined }, usage: makeUsage(prompt) },
         ];
         return { stream: createDelayedStream(chunks, 30) };
+      }
+
+      const multi = detectConcurrencyIntent(prompt);
+      if (multi) {
+        const chunks: any[] = [];
+        multi.forEach((intent, i) => {
+          const callId = `call-${Date.now()}-${i}`;
+          const argsJson = JSON.stringify(intent.args);
+          chunks.push(
+            { type: 'tool-input-start', id: callId, toolName: intent.toolName },
+            { type: 'tool-input-delta', id: callId, delta: argsJson },
+            { type: 'tool-input-end', id: callId },
+            { type: 'tool-call', toolCallId: callId, toolName: intent.toolName, input: argsJson },
+          );
+        });
+        chunks.push({ type: 'finish', finishReason: { unified: 'tool-calls', raw: undefined }, usage: makeUsage(prompt) });
+        return { stream: createDelayedStream(chunks, 20) };
       }
 
       const intent = detectToolIntent(prompt);

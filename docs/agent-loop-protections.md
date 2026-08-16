@@ -1,6 +1,7 @@
 # Agent Loop 三道防护详解
 
 > 配套 [../README.md](../README.md) 的拓展阅读。README 里讲的是"三道防线各管什么"，这篇展开讲**每道防线是怎么实现的、为什么这么设计、在哪里接线**。
+> 想看**工具执行层**的并发控制（读写锁怎么用三个状态变量实现、每个工具声明了哪些并发属性），见姊妹篇 [tool-call-concurrency.md](tool-call-concurrency.md)。
 
 ## 目录
 

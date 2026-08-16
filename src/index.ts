@@ -4,7 +4,8 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { createMockModel } from './mock-model'
 import { createInterface } from 'node:readline';
 import process from 'node:process';
-import { weatherTool, calculatorTool } from './tool/utility-tools';
+import { ToolRegistry } from './tool-registry.ts';
+import { allTools } from './tool/index.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
 
 const deepseek = createOpenAI({
@@ -21,8 +22,20 @@ const rl = createInterface({
     output: process.stdout,
 })
 
+const registry = new ToolRegistry();
+registry.register(...allTools);
+
+console.log(`已注册 ${registry.getAll().length} 个工具：`);
+
+for (const tool of registry.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? '可并发' : '串行',
+    tool.isReadOnly ? '只读' : '读写',
+  ].join(', ');
+  console.log(`  - ${tool.name}（${flags}）`);
+}
+
 const messages: ModelMessage[] = [];
-const tools = { get_weather: weatherTool, calculator: calculatorTool };
 const SYSTEM = '你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。';
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
 const budget: BudgetState = { used: 0, limit: 15000 };
@@ -38,12 +51,11 @@ function ask() {
 
         messages.push({ role: 'user', content: trimmed });
 
-        await agentLoop(model, tools, messages, SYSTEM, budget);
+        await agentLoop(model, registry, messages, SYSTEM, budget);
 
-        ask();
+        if (!rl.closed) ask();   // 管道输入 EOF 时 readline 已关闭，跳过避免 ERR_USE_AFTER_CLOSE
     });
 };
 
-console.log('Chat with agent loop...');
-console.log('试试输入："测试死循环"、"测试重试"、"测试预算" 看三层防护效果\n');
+console.log('Registey Tools...');
 ask();
