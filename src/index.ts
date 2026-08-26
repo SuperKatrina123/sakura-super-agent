@@ -39,7 +39,7 @@ for (const tool of registry.getAll()) {
 const messages: ModelMessage[] = [];
 const SYSTEM = '你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。';
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
-const budget: BudgetState = { used: 0, limit: 15000 };
+const budget: BudgetState = { used: 0, limit: 600000 };
 
 function ask() {
     rl.question('\nYou: ', async (input) => {

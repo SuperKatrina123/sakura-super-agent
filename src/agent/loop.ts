@@ -3,7 +3,7 @@ import { detect, recordCall, recordResult, resetHistory } from '../loop-detectio
 import { isRetryable, calculateDelay, sleep } from '../retry.ts';
 import { ToolRegistry } from '../tool-registry.ts';
 
-const MAX_STEPS = 15;
+const MAX_STEPS = 150;
 const MAX_RETRIES = 3;
 
 export interface BudgetState {
