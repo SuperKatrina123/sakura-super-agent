@@ -241,5 +241,5 @@ Mock 里 `wasAskingTodo()` 靠 `text.includes('todo') && text.includes('找')`�
 ## 下一步实践
 
 - **Research Agent** ✅：一句话让 Agent 抓取 URL、并发多抓、综合摘要 —— 已完成，见 [research-agent-practice.md](research-agent-practice.md)
+- **Vibe Coding** ✅：一句话让 Agent 生成能在浏览器直接跑的多文件 React 应用 —— 已完成，见 [vibe-coding-practice.md](vibe-coding-practice.md)
 - **Deep Research Agent**（延伸）：从"给 URL"演化到"只给主题词" —— 设计方案见 [deep-research-design.md](deep-research-design.md)
-- **Vibe Coding**：一句话让 Agent 生成能在浏览器直接跑的多文件 React 应用

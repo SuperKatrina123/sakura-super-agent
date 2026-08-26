@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibe Coding Preview</title>
+
+  <!-- importmap: 把 bare specifier 映射到 esm.sh 的免构建 ES module CDN -->
+  <!-- 精确锁到 react@18.3.1——避免 minor/patch 升级引入 breaking change -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.3.1",
+        "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+        "react-dom": "https://esm.sh/react-dom@18.3.1",
+        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+      }
+    }
+  </script>
+
+  <!-- Babel Standalone: 浏览器版 Babel，运行时把 TSX/JSX 编译成 ES module -->
+  <!-- 锁到 7.x 精确版本——Babel 8 移除了 allExtensions/isTSX 等选项，会破坏 loader -->
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- 手写小型加载器：递归 fetch + Babel 编译 .tsx，用 Blob URL 交给浏览器 -->
+  <script>
+    (async () => {
+      const cache = new Map();          // 已编译文件的 Blob URL 缓存，避免重复编译
+      const inflight = new Map();       // 正在编译的 promise，防止循环 import 死递归
+
+      // 把相对路径 import 改写成 Blob URL：递归编译被引用的文件
+      async function compile(url) {
+        if (cache.has(url)) return cache.get(url);
+        if (inflight.has(url)) return inflight.get(url);
+
+        const task = (async () => {
+          const rawSrc = await fetch(url).then(r => {
+            if (!r.ok) throw new Error(`${url} → ${r.status}`);
+            return r.text();
+          });
+
+          // 先剔除 CSS import（Babel 编译前处理——编译后格式会变，正则可能失效）
+          // CSS 走 <link> 加载，index.html 里已经引过，源码里的 import './x.css' 直接删掉
+          const src = rawSrc.replace(/^\s*import\s+(?:[\w\s,{}*]+\s+from\s+)?['"]\.\.?\/[^'"]+\.css['"]\s*;?\s*$/gm, '');
+
+          // Babel 编译：presets 覆盖 typescript + react（自动 runtime，不用写 import React）
+          // Babel 8 移除了 allExtensions/isTSX 选项——用 filename 里的 .tsx 后缀自动识别 JSX 即可
+          const { code } = Babel.transform(src, {
+            filename: url,
+            presets: [
+              'typescript',
+              ['react', { runtime: 'automatic' }],
+            ],
+          });
+
+          // 扫 import ... from "./X.tsx" / "./X.ts" / "./X"，把相对路径改写成 Blob URL
+          const importRe = /(from\s+|import\s*\(\s*)(['"])(\.\.?\/[^'"]+?)\2/g;
+          let rewrote = code;
+
+          const rewrites = [];
+          let match;
+          while ((match = importRe.exec(rewrote)) !== null) {
+            // 跳过 .css / .json / 其它非 JS 资源（兜底：CSS 已在编译前删除，这里再挡一次）
+            if (/\.(css|json|svg|png|jpg|gif)$/i.test(match[3])) continue;
+            rewrites.push({ raw: match[0], prefix: match[1], quote: match[2], rel: match[3] });
+          }
+
+          for (const r of rewrites) {
+            const resolved = new URL(r.rel, url).href;
+            // 允许省略后缀：./Button → 尝试 .tsx / .ts / .jsx / .js
+            const candidates = /\.(tsx?|jsx?)$/.test(resolved)
+              ? [resolved]
+              : [`${resolved}.tsx`, `${resolved}.ts`, `${resolved}.jsx`, `${resolved}.js`];
+            let compiledUrl = null;
+            for (const c of candidates) {
+              try { compiledUrl = await compile(c); break; } catch { /* try next */ }
+            }
+            if (!compiledUrl) throw new Error(`无法解析 import: ${r.rel} (from ${url})`);
+            rewrote = rewrote.replace(r.raw, `${r.prefix}${r.quote}${compiledUrl}${r.quote}`);
+          }
+
+          const blob = new Blob([rewrote], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          cache.set(url, blobUrl);
+          return blobUrl;
+        })();
+
+        inflight.set(url, task);
+        try { return await task; } finally { inflight.delete(url); }
+      }
+
+      try {
+        const entryUrl = await compile('./App.tsx');
+        await import(entryUrl);
+      } catch (err) {
+        document.getElementById('root').innerHTML =
+          `<pre style="color:#c00;padding:20px;white-space:pre-wrap;font-family:monospace">加载失败：\n${err.message}\n\n${err.stack || ''}</pre>`;
+        console.error(err);
+      }
+    })();
+  </script>
+</body>
+</html>

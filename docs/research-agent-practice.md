@@ -234,5 +234,5 @@ Step 2 场景 Step 2 里模型做的"重试相同 URL"是**错误规划**——�
 
 ## 下一步实践
 
+- **Vibe Coding** ✅：一句话让 Agent 生成能在浏览器直接跑的多文件 React 应用 —— 已完成，见 [vibe-coding-practice.md](vibe-coding-practice.md)
 - **Deep Research Agent**（延伸）：加 `web_search` 工具，从"给 URL"演化到"只给主题词" —— 设计方案见 [deep-research-design.md](deep-research-design.md)
-- **Vibe Coding**：一句话让 Agent 生成能在浏览器直接跑的多文件 React 应用

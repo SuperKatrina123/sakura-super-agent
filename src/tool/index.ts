@@ -369,8 +369,10 @@ const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
-  '.tsx': 'application/javascript; charset=utf-8',  // 让浏览器把 .tsx 当 JS 加载
-  '.ts': 'application/javascript; charset=utf-8',
+  // .tsx/.ts 走 text/plain：让 loader fetch 拿到原文本，Babel 自己编译
+  // 如果给 application/javascript，浏览器会尝试执行 <Component /> 这类 JSX → SyntaxError
+  '.tsx': 'text/plain; charset=utf-8',
+  '.ts': 'text/plain; charset=utf-8',
   // ...
 };
 
