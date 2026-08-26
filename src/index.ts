@@ -1,4 +1,5 @@
 import 'dotenv/config'
+;(globalThis as any).AI_SDK_LOG_WARNINGS = false
 import { ModelMessage } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createMockModel } from './mock-model'

@@ -90,8 +90,94 @@ function detectConcurrencyIntent(prompt: any[]): ToolCallIntent[] | null {
   ];
 }
 
+// 用户是否在问 TODO——找 user 消息，不受 hasToolResults 影响
+function wasAskingTodo(prompt: any[]): boolean {
+  const userText = (prompt || [])
+    .filter((m: any) => m.role === 'user')
+    .map((m: any) => (m.content || []).map((c: any) => c.text || '').join(''))
+    .join(' ')
+    .toLowerCase();
+  return userText.includes('todo') && (userText.includes('找') || userText.includes('列') || userText.includes('抓') || userText.includes('find'));
+}
+
+// 最近一次工具结果（工具名 + 拼好的字符串内容）
+function getLastToolResult(prompt: any[]): { name: string; content: string } | null {
+  const toolMsgs = (prompt || []).filter((m: any) => m.role === 'tool');
+  const last = toolMsgs[toolMsgs.length - 1];
+  if (!last) return null;
+  const parts = last.content || [];
+  const name = parts[0]?.toolName || '';
+  const content = parts
+    .map((c: any) => {
+      if (c.output?.value) return c.output.value;
+      if (c.output) return String(c.output);
+      return c.text || c.result || '';
+    })
+    .join('');
+  return { name, content };
+}
+
+// TODO 场景的第一步：并发探索 + 定位——list_directory 建立目录认知，grep 精准命中
+function detectTodoInitial(prompt: any[]): ToolCallIntent[] | null {
+  if (hasToolResults(prompt)) return null;   // 只在首轮触发
+  if (!wasAskingTodo(prompt)) return null;
+  return [
+    { toolName: 'list_directory', args: { path: 'sample-project' } },
+    { toolName: 'grep', args: { pattern: 'TODO', path: 'sample-project' } },
+  ];
+}
+
+// TODO 场景的第二步：grep 拿到命中后，并发 read_file 每个涉及的文件
+function detectTodoFollowup(prompt: any[]): ToolCallIntent[] | null {
+  if (!wasAskingTodo(prompt)) return null;
+  const last = getLastToolResult(prompt);
+  if (!last) return null;
+  // 上一轮是 list_directory + grep 一起返回，工具消息里两个都在——只要能找到 grep 输出就触发
+  const toolMsgs = (prompt || []).filter((m: any) => m.role === 'tool');
+  const allParts = toolMsgs.flatMap((m: any) => m.content || []);
+  const grepPart = allParts.find((p: any) => p.toolName === 'grep');
+  if (!grepPart) return null;
+  const grepContent = String(grepPart.output?.value ?? grepPart.output ?? '');
+
+  // 防止无限循环：只在还没触发过 read_file 时进入
+  if (allParts.some((p: any) => p.toolName === 'read_file')) return null;
+
+  const files = Array.from(new Set(
+    grepContent.split('\n')
+      .map(line => line.split(':')[0])
+      .filter(f => f && f.endsWith('.ts'))
+  ));
+  if (files.length === 0) return null;
+  return files.map(f => ({ toolName: 'read_file', args: { path: `sample-project/${f}` } }));
+}
+
 function pickTextResponse(prompt: any[]): string {
   if (hasToolResults(prompt)) {
+    // 走到 TODO 的最后一步：多个 read_file 结果拼进来，做归类总结
+    if (wasAskingTodo(prompt)) {
+      const toolMsgs = (prompt || []).filter((m: any) => m.role === 'tool');
+      const last = toolMsgs[toolMsgs.length - 1];
+      const contents = (last?.content || [])
+        .map((c: any) => c.output?.value ?? c.output ?? c.text ?? c.result ?? '')
+        .map((v: any) => String(v));
+      // 只在真的拿到源码（含 TODO/FIXME/HACK/XXX 的行）时进入归类
+      if (contents.some((c: string) => c.includes('TODO') || c.includes('FIXME'))) {
+        const buckets: Record<string, string[]> = { TODO: [], FIXME: [], HACK: [], XXX: [], NOTE: [] };
+        for (const src of contents) {
+          for (const line of src.split('\n')) {
+            for (const kw of Object.keys(buckets)) {
+              if (line.includes(kw)) { buckets[kw].push(line.trim()); break; }
+            }
+          }
+        }
+        const stats = Object.entries(buckets)
+          .filter(([, arr]) => arr.length > 0)
+          .map(([kw, arr]) => `- **${kw}**: ${arr.length} 条`)
+          .join('\n');
+        return `已并发读取 ${contents.length} 个文件，按类别归类如下：\n\n${stats}\n\n重点关注：\n- FIXME 里的密码明文、时序攻击、jwtSecret 默认值 —— 安全类必须优先修\n- HACK 里的 backdoorLogin —— 上线前必删\n- TODO 主要是待接入的外部依赖（数据库、支付网关、结构化日志）与待补的校验逻辑`;
+      }
+    }
+
     const toolMsgs = (prompt || []).filter((m: any) => m.role === 'tool');
     const lastResult = toolMsgs[toolMsgs.length - 1];
     const content = (lastResult?.content || [])
@@ -172,7 +258,7 @@ export function createMockModel() {
         };
       }
 
-      const multi = detectConcurrencyIntent(prompt);
+      const multi = detectConcurrencyIntent(prompt) || detectTodoInitial(prompt) || detectTodoFollowup(prompt);
       if (multi) {
         return {
           content: multi.map((intent, i) => ({
@@ -230,7 +316,7 @@ export function createMockModel() {
         return { stream: createDelayedStream(chunks, 30) };
       }
 
-      const multi = detectConcurrencyIntent(prompt);
+      const multi = detectConcurrencyIntent(prompt) || detectTodoInitial(prompt) || detectTodoFollowup(prompt);
       if (multi) {
         const chunks: any[] = [];
         multi.forEach((intent, i) => {
