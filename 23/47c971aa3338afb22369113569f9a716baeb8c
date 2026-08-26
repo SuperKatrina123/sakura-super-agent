@@ -1,0 +1,29 @@
+docs/code-agent-todo-practice.md
+  s_33d3f3fff6ddaa::t_df61878f9285ae 105-131
+  s_33d3f3fff6ddaa::t_9646061aceb7eb 196-218
+  s_33d3f3fff6ddaa::t_174f6b5220eed0 238-239
+  s_33d3f3fff6ddaa::t_d6e0a0b64ad7fc 243
+  s_33d3f3fff6ddaa::t_52a6a62d799fbb 244
+  s_33d3f3fff6ddaa::t_058064521265c4 31-32
+  s_33d3f3fff6ddaa::t_989198f5f42538 1-30,33-104,132-195,219-237,240-242,245
+docs/research-agent-practice.md
+  s_33d3f3fff6ddaa::t_95fd1babfda02c 1-238
+docs/deep-research-design.md
+  s_33d3f3fff6ddaa::t_732c9e0fb73544 1-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "2347c971aa3338afb22369113569f9a716baeb8c",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
