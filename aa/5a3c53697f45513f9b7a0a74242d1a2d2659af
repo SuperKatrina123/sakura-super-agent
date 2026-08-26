@@ -1,0 +1,36 @@
+docs/research-agent-practice.md
+  s_33d3f3fff6ddaa::t_075f46670973e4 237
+CLAUDE.md
+  s_33d3f3fff6ddaa::t_9ea6df81cd1e77 1-84
+docs/code-agent-todo-practice.md
+  s_33d3f3fff6ddaa::t_cfb99927a262e5 244
+docs/vibe-coding-practice.md
+  s_33d3f3fff6ddaa::t_4016c97f932d7a 250-328
+  s_33d3f3fff6ddaa::t_8b9e9fb1e8d5de 1-249,329-376
+src/tool/index.ts
+  s_33d3f3fff6ddaa::t_e174b2759ef0f6 372-375
+app/index.html
+  s_33d3f3fff6ddaa::t_56b8a180afc7e1 9,13-16,22-23
+  s_33d3f3fff6ddaa::t_30fe40f2efada3 52,56
+  s_33d3f3fff6ddaa::t_974fbe7a2f0152 64,67,69
+  s_33d3f3fff6ddaa::t_cdab87973c47a7 42,47-50,63,68
+  s_33d3f3fff6ddaa::t_ea66c2411e90e6 1-8,10-12,17-21,24-41,43-46,51,53-55,57-62,65-66,70-108
+src/index.ts
+  s_33d3f3fff6ddaa::t_4735485a1861ac 40-63
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "aa5a3c53697f45513f9b7a0a74242d1a2d2659af",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
