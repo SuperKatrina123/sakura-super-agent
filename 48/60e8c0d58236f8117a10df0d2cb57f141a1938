@@ -1,0 +1,21 @@
+src/mock-model.ts
+  s_33d3f3fff6ddaa::t_29f2b4da075842 261
+  s_33d3f3fff6ddaa::t_e02081fa3c83a7 120-129,134-143,146
+  s_33d3f3fff6ddaa::t_68f3a67da6a87b 319
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "4860e8c0d58236f8117a10df0d2cb57f141a1938",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
