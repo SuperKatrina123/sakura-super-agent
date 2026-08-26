@@ -1,0 +1,53 @@
+docs/research-agent-practice.md
+  s_33d3f3fff6ddaa::t_95fd1babfda02c 1-236,238
+  s_33d3f3fff6ddaa::t_075f46670973e4 237
+app/index.html
+  s_33d3f3fff6ddaa::t_ea66c2411e90e6 1-8,10-12,17-21,24-41,43-46,51,53-55,57-62,65-66,70-108
+  s_33d3f3fff6ddaa::t_56b8a180afc7e1 9,13-16,22-23
+  s_33d3f3fff6ddaa::t_cdab87973c47a7 42,47-50,63,68
+  s_33d3f3fff6ddaa::t_30fe40f2efada3 52,56
+  s_33d3f3fff6ddaa::t_974fbe7a2f0152 64,67,69
+docs/code-agent-todo-practice.md
+  s_33d3f3fff6ddaa::t_989198f5f42538 1-30,33-104,132-195,219-237,240-242
+  s_33d3f3fff6ddaa::t_058064521265c4 31-32
+  s_33d3f3fff6ddaa::t_df61878f9285ae 105-131
+  s_33d3f3fff6ddaa::t_9646061aceb7eb 196-218
+  s_33d3f3fff6ddaa::t_174f6b5220eed0 238-239
+  s_33d3f3fff6ddaa::t_d6e0a0b64ad7fc 243
+  s_33d3f3fff6ddaa::t_52a6a62d799fbb 245
+  s_33d3f3fff6ddaa::t_cfb99927a262e5 244
+docs/vibe-coding-practice.md
+  s_33d3f3fff6ddaa::t_8b9e9fb1e8d5de 1-249,329-376
+  s_33d3f3fff6ddaa::t_4016c97f932d7a 250-328
+CLAUDE.md
+  s_33d3f3fff6ddaa::t_9ea6df81cd1e77 1-84
+src/index.ts
+  s_3f8649612f066d::t_3e21739a309627 2
+  s_33d3f3fff6ddaa::t_4735485a1861ac 40-63
+src/tool/index.ts
+  s_33d3f3fff6ddaa::t_e174b2759ef0f6 372-375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "4548ebe48bb0f39a50494420d6dadddfdb02705e",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    },
+    "s_3f8649612f066d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92581b4b-de43-455c-b7d7-d162bf6d4ec1",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
