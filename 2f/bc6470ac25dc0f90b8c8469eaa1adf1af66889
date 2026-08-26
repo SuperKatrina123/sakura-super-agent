@@ -1,0 +1,43 @@
+package.json
+  s_33d3f3fff6ddaa::t_1bcbf81602f574 17-19,22,24
+src/tool/index.ts
+  s_33d3f3fff6ddaa::t_790c8e7f77a18b 21-25,27-28
+  s_33d3f3fff6ddaa::t_ab605987e3d614 402-521,524-527,529-531,533-542,544-545,547,549,551-554,556,560
+  s_33d3f3fff6ddaa::t_9d56f967d51da0 522-523
+  s_33d3f3fff6ddaa::t_67528f50433163 6-20,26,29-30
+  s_33d3f3fff6ddaa::t_15320cac66144e 528,532,543,546,548,550
+  s_33d3f3fff6ddaa::t_f45a7b5adb270b 559
+src/index.ts
+  s_33d3f3fff6ddaa::t_59165ab21a5b3a 9
+  s_33d3f3fff6ddaa::t_aefe99d1a7d827 27-32
+docs/deep-research-design.md
+  s_33d3f3fff6ddaa::t_19517998a4edab 429
+  s_33d3f3fff6ddaa::t_815563c376cd71 470
+  s_33d3f3fff6ddaa::t_48f84d2da01e6e 482
+  s_33d3f3fff6ddaa::t_de6153d606d01d 494
+  s_33d3f3fff6ddaa::t_9132cb2c678e5f 457
+  s_33d3f3fff6ddaa::t_86301ca26fc2d1 513
+  s_33d3f3fff6ddaa::t_aff94252168e39 325
+  s_33d3f3fff6ddaa::t_8daacdf48ce4c3 373
+  s_33d3f3fff6ddaa::t_66893e0761a772 502
+  s_33d3f3fff6ddaa::t_4fbc7a1a9416d6 407
+  s_33d3f3fff6ddaa::t_2c7c14106faa18 345
+  s_33d3f3fff6ddaa::t_cfe7a27e2fa612 171,173-283
+  s_33d3f3fff6ddaa::t_99f5c7dd4c80af 33,35-170,172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "2fbc6470ac25dc0f90b8c8469eaa1adf1af66889",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
