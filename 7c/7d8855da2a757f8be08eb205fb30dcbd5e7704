@@ -1,0 +1,32 @@
+src/index.ts
+  s_3f8649612f066d::t_3e21739a309627 2
+  s_33d3f3fff6ddaa::t_4735485a1861ac 45-68
+src/tool/index.ts
+  s_33d3f3fff6ddaa::t_e174b2759ef0f6 350-353
+docs/deep-research-design.md
+  s_33d3f3fff6ddaa::t_732c9e0fb73544 1-32,34,285-324,326-344,346-372,374-406,408-428,430-456,458-469,471-481,483-493,495-501,503-512,514-522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "7c7d8855da2a757f8be08eb205fb30dcbd5e7704",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    },
+    "s_3f8649612f066d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92581b4b-de43-455c-b7d7-d162bf6d4ec1",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
