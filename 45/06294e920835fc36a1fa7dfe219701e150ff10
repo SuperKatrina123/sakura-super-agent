@@ -1,0 +1,45 @@
+sample-project/user-service.ts
+  s_33d3f3fff6ddaa::t_c44251fe00829b 1-105
+sample-project/config.ts
+  s_33d3f3fff6ddaa::t_33480890574f68 1-15
+src/mock-model.ts
+  s_33d3f3fff6ddaa::t_cca4d0e94af2d4 43-47
+  s_33d3f3fff6ddaa::t_eb315e972ec0a2 98-119,130-133
+  s_33d3f3fff6ddaa::t_e02081fa3c83a7 120-129,134-143,146
+  s_33d3f3fff6ddaa::t_63a81ebea084d8 144-145,147-151,153-168
+  s_33d3f3fff6ddaa::t_3e878b77074dbf 152
+  s_33d3f3fff6ddaa::t_7cf2ac6e0eaafe 249
+  s_33d3f3fff6ddaa::t_29f2b4da075842 261
+  s_33d3f3fff6ddaa::t_16271ae663064c 307
+  s_33d3f3fff6ddaa::t_68f3a67da6a87b 319
+sample-project/payment.ts
+  s_33d3f3fff6ddaa::t_6d6722ef4a810d 1-30
+sample-project/logger.ts
+  s_33d3f3fff6ddaa::t_c0041b9f8571c6 1-22
+src/index.ts
+  s_3f8649612f066d::t_3e21739a309627 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "4506294e920835fc36a1fa7dfe219701e150ff10",
+  "prompts": {},
+  "sessions": {
+    "s_33d3f3fff6ddaa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124194f0-f2da-43ea-8f78-b15a9282fc4a",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    },
+    "s_3f8649612f066d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "92581b4b-de43-455c-b7d7-d162bf6d4ec1",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "yy_ying <yy_ying@trip.com>"
+    }
+  }
+}
