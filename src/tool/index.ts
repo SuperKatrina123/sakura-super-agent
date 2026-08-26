@@ -3,6 +3,31 @@ import { extname, join, relative, resolve } from 'node:path';
 import type { ToolDefinition } from '../tool-registry.ts';
 import { execSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
+import TurndownService from 'turndown';
+import { JSDOM } from 'jsdom';
+
+// HTML → Markdown 转换器：turndown 需要 DOM 环境，用 jsdom 提供
+// 单例复用，避免每次 fetch 都重建 turndown 实例
+const turndownService = new TurndownService({
+    headingStyle: 'atx',         // 用 # 而不是 setext 下划线，输出更紧凑
+    codeBlockStyle: 'fenced',    // 用 ``` 而不是四空格缩进
+    bulletListMarker: '-',       // 列表用 -，跟 Markdown 主流风格一致
+});
+
+function htmlToMarkdown(html: string): string {
+    const doc = new JSDOM(html).window.document;
+    // 剥掉 script / style / noscript / iframe——正文里没用、还会污染输出
+    doc.querySelectorAll('script, style, noscript, iframe').forEach(el => el.remove());
+    // 剥掉 img 的 base64 src——data:image 二进制会占几十 KB、对 Agent 完全无用
+    doc.querySelectorAll('img').forEach(img => {
+        const src = img.getAttribute('src') || '';
+        if (src.startsWith('data:')) img.remove();
+    });
+    return turndownService.turndown(doc.body || doc.documentElement)
+        .replace(/^#{1,6}\s*\[?\]?\(?[/#]?\)?\s*$/gm, '')   // 剥掉空标题（如 "# [](/)"）
+        .replace(/\n{3,}/g, '\n\n')                           // 多个空行合并成一个
+        .trim();
+}
 
 // 模拟真实 I/O 延迟：让并发窗口可见（配合 `测试并发` 观察读写锁）。测完可删或调回 0
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -316,53 +341,6 @@ export const bashTool: ToolDefinition = {
   },
 };
 
-const MOCK_PAGES: Record<string, string> = {
-  'https://esm.sh': `esm.sh - 一个免费的 ES module CDN...`,
-  'https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling': `AI SDK Core - Tools and Tool Calling
-工具是模型可以决定调用的函数。一个工具由三部分组成：
-- description：告诉模型何时使用这个工具
-- inputSchema：通过 Zod 或 JSON Schema 定义参数
-- execute：实际在服务端运行的函数...`,
-  // ... 更多预定义页面
-};
-
-export const fetchUrlTool: ToolDefinition = {
-  name: 'fetch_url',
-  description: '抓取指定 URL 的网页内容并转换为纯文本（自动剥离 HTML 标签）',
-  parameters: {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: '完整 URL，必须以 http:// 或 https:// 开头' },
-    },
-    required: ['url'],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,    // 只读、可并发——抓多个 URL 时直接并行
-  isReadOnly: true,
-  maxResultChars: 1500,        // 网页通常很长，截断兜底
-  execute: async ({ url }: { url: string }) => {
-    for (const key of Object.keys(MOCK_PAGES)) {
-      if (url.startsWith(key)) return MOCK_PAGES[key];
-    }
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 SuperAgent' },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!res.ok) return `请求失败：HTTP ${res.status}`;
-      const html = await res.text();
-      return html
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim() || '页面无文本内容';
-    } catch (err: any) {
-      return `抓取失败：${err.message}`;
-    }
-  },
-};
-
 let previewServer: Server | null = null;
 
 const MIME: Record<string, string> = {
@@ -421,9 +399,163 @@ export const startPreviewTool: ToolDefinition = {
 
 
 
+// ── web_search: Tavily（自动挡）+ Serper（手动挡）─────────────
+// 两个工具都叫 web_search——对模型透明，通过 pickSearchTool() 二选一注册
+
+export const tavilySearchTool: ToolDefinition = {
+  name: 'web_search',
+  description: '搜索互联网获取最新信息。返回相关网页的标题、链接和内容摘要',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: '搜索关键词' },
+      max_results: { type: 'number', description: '返回结果数量，默认 5' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 3000,
+  execute: async ({ query, max_results = 5 }: { query: string; max_results?: number }) => {
+    const apiKey = process.env.TAVILY_API_KEY;
+    if (!apiKey) return '[web_search] 未配置 TAVILY_API_KEY，请在 .env 中设置';
+
+    try {
+      const res = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: apiKey,
+          query,
+          max_results,
+          include_answer: true,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return `[web_search] 请求失败: HTTP ${res.status}`;
+
+      const data = await res.json() as any;
+      const lines: string[] = [];
+
+      if (data.answer) {
+        lines.push(`## AI 摘要\n${data.answer}\n`);
+      }
+
+      for (const r of data.results || []) {
+        lines.push(`### ${r.title}`);
+        lines.push(r.url);
+        lines.push(r.content || r.snippet || '');
+        lines.push('');
+      }
+
+      return lines.join('\n') || '没有找到相关结果';
+    } catch (err: any) {
+      return `[web_search] 请求异常: ${err.message}`;
+    }
+  },
+};
+
+export const serperSearchTool: ToolDefinition = {
+  name: 'web_search',
+  description: '搜索互联网获取最新信息。返回 Google 搜索结果的标题、链接和摘要',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: '搜索关键词' },
+      max_results: { type: 'number', description: '返回结果数量，默认 5' },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 3000,
+  execute: async ({ query, max_results = 5 }: { query: string; max_results?: number }) => {
+    const apiKey = process.env.SERPER_API_KEY;
+    if (!apiKey) return '[web_search] 未配置 SERPER_API_KEY，请在 .env 中设置';
+
+    try {
+      const res = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: {
+          'X-API-KEY': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ q: query, num: max_results }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return `[web_search] 请求失败: HTTP ${res.status}`;
+
+      const data = await res.json() as any;
+      const lines: string[] = [];
+
+      if (data.knowledgeGraph) {
+        const kg = data.knowledgeGraph;
+        lines.push(`## ${kg.title}`);
+        if (kg.description) lines.push(kg.description);
+        lines.push('');
+      }
+
+      for (const r of (data.organic || []).slice(0, max_results)) {
+        lines.push(`### ${r.title}`);
+        lines.push(r.link);
+        lines.push(r.snippet || '');
+        lines.push('');
+      }
+
+      return lines.join('\n') || '没有找到相关结果';
+    } catch (err: any) {
+      return `[web_search] 请求异常: ${err.message}`;
+    }
+  },
+};
+
+// 根据环境变量二选一——TAVILY 优先。都没有时也返回 tavily（execute 里会给出"未配置"提示）
+export function pickSearchTool(): ToolDefinition {
+  if (process.env.TAVILY_API_KEY) return tavilySearchTool;
+  if (process.env.SERPER_API_KEY) return serperSearchTool;
+  return tavilySearchTool;
+}
+
+// ── web_fetch: 手动挡配套的真实抓取工具 ─────────────────────
+// web_fetch: 抓取真实网页，转成 Markdown 保留结构（标题/列表/代码块/链接）
+// 走真实网络请求，无 mock 拦截——适合 web_search 找到 URL 后精读
+// 返回剥好的纯文本，超过上限自动截断
+
+export const webFetchTool: ToolDefinition = {
+  name: 'web_fetch',
+  description: '抓取指定 URL 的网页内容，转换为 Markdown 格式（保留标题、列表、代码块、链接等结构）',
+  parameters: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: '完整 URL' },
+    },
+    required: ['url'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 5000,
+  execute: async ({ url }: { url: string }) => {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SuperAgent/1.0)' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return `抓取失败: HTTP ${res.status}`;
+      const html = await res.text();
+      return htmlToMarkdown(html) || '页面无文本内容';
+    } catch (err: any) {
+      return `抓取失败: ${err.message}`;
+    }
+  },
+};
+
 export const allTools: ToolDefinition[] = [
-    weatherTool, calculatorTool, readFileTool, 
+    weatherTool, calculatorTool, readFileTool,
     writeFileTool, listDirectoryTool, editFileTool,
     bashTool, grepTool, globTool,
-    fetchUrlTool, startPreviewTool
+    startPreviewTool,
+    webFetchTool,
 ];

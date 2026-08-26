@@ -30,9 +30,257 @@ Agent 自主完成：
 | 上下文 | 全量塞进 messages | 摘要压缩，只保留精华 |
 | 停止 | 模型自己 `hasToolCall=false` | 软停止条件（问题回答完） |
 
-## 二、架构增量
+## 二、前置知识：搜索 API 生态
 
-### 2.1 新增工具：`web_search`
+在设计 `web_search` 工具之前，需要先想清楚一个问题：**"搜索"这个能力到底怎么接？**
+
+用过 Claude Code 的 WebSearch、用过 Cursor 的联网搜索，本质就是一个 Tool——调一个搜索 API 拿结果，跟我们之前写的 `get_weather` 没有本质区别。
+
+**但搜索这个场景有意思的地方在于：市面上的搜索 API 五花八门，选哪个直接影响 Agent 的信息质量和使用成本**。
+
+### 2.1 三类搜索 API
+
+#### 第一类：传统搜索引擎 API（Google 生态）
+
+**代表**：Serper、SerpAPI、ScraperAPI
+
+**做的事**：**Google 搜索结果的爬虫代理**——绕过 Google 官方限制，拿到跟浏览器里搜 google.com 一样的结果。
+
+**返回结构**：
+```json
+{
+  "organic": [
+    { "title": "...", "link": "...", "snippet": "150 字预览" }
+  ]
+}
+```
+
+**特点**：
+- ✅ **搜索质量 = Google 质量**（业界天花板）
+- ✅ 便宜（Serper $50 / 10K 搜索 = 单次 $0.005）
+- ❌ **只返回摘要**——真要读文章还得二次 `fetch_url`
+- ❌ 本质是绕过 Google 反爬的灰色地带
+
+**适合**：预算敏感、需要 Google 结果质量、Agent 有能力二次抓取。
+
+#### 第二类：AI-native 搜索 API
+
+**代表**：Tavily、Exa、Perplexity Sonar API
+
+**做的事**：**为 LLM 优化的搜索**——不只返回链接，还**抓好网页正文、按相关性排序、甚至直接给一段 AI 总结**。
+
+**返回结构**（Tavily 示例）：
+```json
+{
+  "answer": "AI 直接给的一段答案",
+  "results": [
+    { "title": "...", "url": "...", "content": "5000 字正文（不是 snippet）", "score": 0.94 }
+  ]
+}
+```
+
+**特点**：
+- ✅ **一次调用拿全**：链接 + 正文 + 排序 + 摘要（Agent 不用二次 fetch）
+- ✅ 结果为 LLM 优化过——去广告、去导航栏、按语义相关度排
+- ❌ 贵（Tavily $5 / 1K 搜索 = 5 倍 Serper）
+- ❌ 结果覆盖不如 Google 全（是二级源）
+
+**适合**：Deep Research 类场景、追求"少步数完成任务"、不差钱。
+
+#### 第三类：垂直/新范式搜索
+
+**代表**：Brave Search（隐私中立的独立索引）、Exa（语义搜索）、Kagi（付费无广告）
+
+**做的事**：用不同的搜索哲学：
+- **Brave**：不用 Google，自建索引 + 用户隐私第一
+- **Exa**：**用 embedding 做语义搜索**——搜 "startups building LLM agents"，不匹配关键词而是匹配"含义相近"的内容
+- **Kagi**：付费换无广告、无 SEO 垃圾
+
+**特点**：
+- ✅ 独特的搜索能力（Exa 能找到 Google 找不到的"意图相近"内容）
+- ✅ 隐私 / 无广告
+- ❌ 覆盖不如 Google
+- ❌ 定价更高（Kagi 用户订阅制）
+
+**适合**：特定场景（研究、学术、隐私）、不追求"搜什么都有"。
+
+### 2.2 三个选型判断维度
+
+选搜索 API 本质是回答三个问题：
+
+**问题 1：Agent 需要的是"链接"还是"内容"？**
+- 需要链接（然后自己抓取）→ 传统搜索 API（Serper）
+- 需要内容（一步到位）→ AI-native（Tavily）
+
+**Deep Research 场景 → Tavily 更合适**：省一次 fetch_url 调用 = 省时间 + 省 token + 少一层不确定性（真实 fetch 可能超时、可能返回 JS-rendered 空页）。
+
+**问题 2：搜索的"覆盖率"重要还是"精准度"重要？**
+- 覆盖率（"帮我找所有相关信息"）→ Serper（Google 全量）
+- 精准度（"最相关的 5 个来源就够"）→ Tavily / Exa（已排序）
+
+**问题 3：成本能承受多少？**
+
+单次 Deep Research 大概搜 2-3 次：
+
+| API | 单次成本 | Deep Research 单次成本 |
+|---|---|---|
+| Serper | $0.005 | ~$0.015 |
+| Tavily basic | $0.005 | ~$0.015 |
+| Tavily advanced | $0.01 | ~$0.03 |
+| Exa | $0.01 | ~$0.03 |
+| Kagi | 订阅 $10/月 | 摊薄很低 |
+
+**看起来都很便宜**——但一天跑 100 次研究，Tavily advanced 就是 $3/天 = $90/月。加上 LLM 输出成本，搜索 API 只是小头。
+
+### 2.3 一个反直觉观察：大厂产品不用第三方 API
+
+**主流 Deep Research 产品用的都是自己的搜索**：
+
+- **OpenAI Deep Research** → Bing（微软战略投资、Azure 内部通道）
+- **Perplexity Pro Search** → **自训练的重排模型** + 混合来源
+- **Google Deep Research** → Google Search（自家）
+- **Anthropic Claude** → Brave（战略合作）
+
+**为什么不用 Tavily / Serper**？
+
+- **成本**：产品级流量下第三方 API 成本失控
+- **质量控制**：第三方 API 是黑盒，改动了你没法预警
+- **战略**：搜索是护城河，用别人的等于把命脉交出去
+
+**对我们的启示**：**做原型用 Tavily / Serper 都行，做产品必须自己控搜索层**。本文档推荐 Serper / Brave / Mock 三选一，是"能跑通"的最低成本方案——**不是"能变产品"的方案**。
+
+### 2.4 工具接口设计：暴露差异 vs 统一抽象
+
+从 Agent 视角看，`web_search` tool 应该长什么样？
+
+**方案 A：暴露原始 API 差异**
+```ts
+web_search_serper(query, limit)
+web_search_tavily(query, mode: 'basic' | 'advanced')
+```
+Agent 需要知道用哪个——**心智负担**。
+
+**方案 B：统一抽象**（推荐）
+```ts
+web_search(query, mode: 'quick' | 'deep')
+```
+`quick` → Serper 拿链接；`deep` → Tavily 拿正文。Agent 只关心"要多深"，不关心后端。
+
+**方案 B 是对的**——这跟 [src/tool-registry.ts](../src/tool-registry.ts) 里"读写锁"的哲学一样：**把复杂度封在工具层，Agent 只看清晰的语义**。
+
+## 三、实测对照：Tavily 自动挡 vs Serper 手动挡
+
+在真正实施 Deep Research 之前，我们**先接了 Tavily 和 Serper 两个后端**（[src/tool/index.ts](../src/tool/index.ts) 里的 `tavilySearchTool` / `serperSearchTool`，通过 `pickSearchTool()` 根据环境变量自动切换），并且做了**三次实测**——结果比理论预期更有意思。
+
+### 3.1 三次实测数据
+
+| # | 问题 | 后端 | 步数 | Token | 触发 web_fetch | Agent 表现 |
+|---|---|---|---|---|---|---|
+| A | esm.sh 是什么 | Tavily | 2 | 4914 | 否 | 搬运正文 |
+| B | esm.sh 是什么 | Serper | 2 | 4540 | 否 | snippet 已足够，直接答 |
+| C | Vercel AI SDK 最新版本 | Serper | 2 | 4948 | 否 | **中英双语并发搜索** |
+
+### 3.2 五个关键差异点
+
+#### （1）Token 消耗差距远小于预期
+
+同一浅问题（"esm.sh 是什么"）:
+- Tavily：**4914 token**
+- Serper：**4540 token**
+
+**只差 8%**——不是理论预估的"贵 3 倍"。原因是**这两次都是 2 步完成的浅问题**，谁都没触发多轮迭代。
+
+Tavily 的成本溢价体现在"每条来源附带 500+ 字正文"——Agent 消化正文用了更多 output token，但整体只多几百。
+
+**换句话说**：Tavily 更贵的假设**只在多轮场景**下成立。单次浅问答里，两者成本差异可忽略。
+
+#### （2）输出深度：Tavily 更细，但可能是过量信息
+
+**Tavily 输出里独有的技术细节**：
+- "esm.sh 用 Go + esbuild 写的"（来自 Medium 文章正文）
+- "esm.sh/tsx 是 1KB 脚本"（来自官网正文）
+- "Deno 兼容"（来自官网正文）
+
+**Serper 输出**：介绍性内容为主，没有深度细节。
+
+**核心差异**：
+- Tavily = 帮你读完 5 篇文章的摘要员
+- Serper = 只给你 5 个标题让你自己判断
+
+对"简单介绍"这类浅问题，**Tavily 的深度是过量**——用户其实不需要那么详细。反过来对"研究报告"类深问题，Serper 的 snippet 就明显不够。
+
+#### （3）Agent 智能表现：Serper 场景更精彩
+
+**Tavily 场景**：Agent 就是搬运工——正文都给你了，翻译整理输出即可。**几乎没有"推理"**。
+
+**Serper 场景**（C 实验最典型）：Agent 表现出**三层规划能力**：
+
+```
+Step 1（一步内并发）：
+  [调用: web_search({"query":"Vercel AI SDK latest version"})]    ← 英文搜索
+  [调用: web_search({"query":"Vercel AI SDK 最新版本"})]           ← 中文搜索
+```
+
+- **并发意图**：一步内发出 2 个 tool 调用
+- **双语覆盖**：主动想到中英双语搜索能覆盖不同信息源
+- **信息源判断**：从 10 条 snippet 里精准挑出 npm 官方页面（认为最权威）
+
+这**不是我用 SYSTEM prompt 引导的**——是模型自己的规划。**"手动挡逼出研究员气质"**的最好证据。
+
+#### （4）触发 web_fetch 的真实边界
+
+**三次实测里没有一次自然触发 web_fetch**——原因是这些问题的答案都在 snippet 或 Tavily 摘要里。
+
+**我之前的判断（"深问题就会触发"）不够准确**。真正的规律是：
+
+**web_fetch 触发条件 = "snippet 里没有明确答案 + 用户问的是具体细节"**
+
+- ✅ 触发：`esm.sh 的构建流程细节` → snippet 只有介绍
+- ✅ 触发：`v3 Language Model Specification 跟 v2 有什么区别` → 需要读 blog 原文
+- ❌ 不触发：`esm.sh 是什么` → snippet 已足够
+- ❌ 不触发：`最新版本是什么` → snippet 里 npm 页面明确写了 `7.0.79`
+
+**Agent 会自己判断这个边界**——**"够用即停"** 是元认知的直接体现。
+
+#### （5）意外发现：工具设计失误
+
+C 实验暴露了一个隐性 bug——**当时项目里同时存在 `fetch_url`（老）和 `web_fetch`（新）**：
+
+```
+[调用: fetch_url({"url":"https://www.npmjs.com/package/ai"})]   ← 模型选错了
+```
+
+- `fetch_url` 带 MOCK_PAGES 拦截（老演示用）
+- `web_fetch` 纯真实网络（新加的）
+- 功能重叠，模型面对语义相似的两个工具**随机选择**
+- 选到 `fetch_url` 后如果命中 MOCK_PAGES，**用户以为在跑真实数据，实际是假数据**
+
+**修复**：删掉 `fetch_url`，只留 `web_fetch`。**工具集不允许语义重叠**。
+
+### 3.3 决策建议
+
+结合三次实测数据 + 五个差异点：
+
+| 场景 | 推荐后端 | 理由 |
+|---|---|---|
+| 生产级 Agent（聊天/问答） | **Tavily** | 一步搞定、失败面小、延迟低 |
+| 学习/演示（技术分享、教学） | **Serper** | 能观察 Agent 完整决策链 |
+| Deep Research（研究报告） | **Serper + SYSTEM 引导** | 强制 web_fetch，展示多轮迭代 |
+| 混合场景 | 两个都接，环境变量切换 | 现在这个项目的做法 |
+
+### 3.4 从三次实测吸收的教训
+
+**教训 1：不要假设"深问题一定触发多步"**。Agent 会自己判断信息够不够，snippet 质量高的话就一步答完。想触发多步，要么问 snippet 答不出的问题，要么 SYSTEM prompt 强制约束。
+
+**教训 2：Tavily 的成本溢价场景性**。浅问题差不多、深问题差距扩大——真实成本要在具体场景测才知道。
+
+**教训 3：工具集合语义重叠是隐性 bug**。新工具替代旧工具时必须删掉旧的。**"以防万一留着"是错的**——Agent 面对两个相似工具会随机选择，出错难以复现。
+
+**教训 4：`isConcurrencySafe: true` 让"双语搜索"这种智能行为变得可能**。如果 web_search 声明串行，模型也只会一次发一个 query。**工具的并发属性会影响 Agent 的规划风格**。
+
+## 四、架构增量
+
+### 4.1 新增工具：`web_search`
 
 **接口设计**：
 
@@ -74,7 +322,7 @@ https://url.com
 
 模型看到这个格式，自然会用后续的 fetch_url 精读 URL。**格式即接口**。
 
-### 2.2 后端可插拔设计
+### 4.2 后端可插拔设计
 
 `searchProvider` 抽象成一个接口，具体实现在环境变量控制下切换：
 
@@ -94,7 +342,7 @@ export const searchProvider: SearchProvider =
 
 **Mock 实现**：预置几个主题的搜索结果字典，让无 API key 时也能跑通链路演示。
 
-### 2.3 提示词工程：Deep Research 模式
+### 4.3 提示词工程：Deep Research 模式
 
 在 [src/index.ts](../src/index.ts) 的 `SYSTEM` 里追加一段：
 
@@ -122,7 +370,7 @@ export const searchProvider: SearchProvider =
 - **输出格式**明确（结构化 md + 引用）
 - **元认知步骤**（"反思"环节是 Deep Research 的核心区别）
 
-### 2.4 上下文管理（可选，二阶段）
+### 4.4 上下文管理（可选，二阶段）
 
 **问题**：Deep Research 一次能跑 20+ 次 fetch_url，每次返回 1500 字 → messages 累计 30000+ 字 → token 消耗爆炸。
 
@@ -156,7 +404,7 @@ messages（对话流）      scratchpad（研究笔记）
 
 **方案 B 是产品级设计**，但也是最复杂的一层——建议先跑通方案 A，遇到瓶颈再上 B。
 
-## 三、Agent Loop 层面的变化
+## 五、Agent Loop 层面的变化
 
 好消息：**几乎不用改**。
 
@@ -178,7 +426,7 @@ const MAX_STEPS = 50;  // 从 30 调到 50
 
 **理由**：Deep Research 一次典型对话是 15-25 步（3 轮 search × 每轮 3-5 个 fetch + 反思 + 综合），token 消耗 100k-200k。
 
-## 四、防线的新角色
+## 六、防线的新角色
 
 ### 4.1 循环检测：从"防呆"到"防重复搜索"
 
@@ -206,7 +454,7 @@ if (budget.used / budget.limit > 0.8 && !warned) {
 
 30 步不够时调到 50。但**不要无限调大**——步数上限是最后的安全网，防止无限循环。
 
-## 五、Mock 层演化（可选）
+## 七、Mock 层演化（可选）
 
 如果想保持 mock 模式下的可演示性，需要在 [src/mock-model.ts](../src/mock-model.ts) 加：
 
@@ -219,7 +467,7 @@ if (budget.used / budget.limit > 0.8 && !warned) {
 
 **建议**：这个实践只对真实模型有意义，mock 层不做深度改造。
 
-## 六、验证清单
+## 八、验证清单
 
 跑通后应该能观察到：
 
@@ -231,7 +479,7 @@ if (budget.used / budget.limit > 0.8 && !warned) {
 - [ ] 最终一步 write_file 到 `reports/` 目录
 - [ ] 完整报告有摘要 / 关键发现 / 引用列表结构
 
-## 七、成本预估（真实模型）
+## 九、成本预估（真实模型）
 
 按 DeepSeek-Chat 定价（假设 1M 输入 ¥1 / 1M 输出 ¥8）：
 
@@ -243,7 +491,7 @@ if (budget.used / budget.limit > 0.8 && !warned) {
 
 Serper API 免费 2500 次搜索 → 一天 100 次研究，每次 2-3 个搜索 = **免费额度够用几周**。
 
-## 八、实施路径（如果决定动手）
+## 十、实施路径（如果决定动手）
 
 **Day 1**：注册 Serper 拿 key + 实现 `web_search` 工具 + 注册到 tool 列表
 **Day 2**：改 SYSTEM prompt + 跑第一个真实场景（"研究 esm.sh"）
@@ -251,7 +499,7 @@ Serper API 免费 2500 次搜索 → 一天 100 次研究，每次 2-3 个搜索
 **Day 4（可选）**：加"抓完立即摘要"（方案 A）压缩上下文
 **Day 5（可选）**：加 scratchpad 工具（方案 B）
 
-## 九、Deep Research 类产品的护城河
+## 十一、Deep Research 类产品的护城河
 
 技术架构层面，做到"能跑"其实门槛不高——**你现在的 Agent Loop + fetch_url 就是雏形**。真正的护城河在：
 
@@ -262,7 +510,7 @@ Serper API 免费 2500 次搜索 → 一天 100 次研究，每次 2-3 个搜索
 
 **架构层面，你已经到了。剩下的都是产品化的深度。**
 
-## 十、决策点
+## 十二、决策点
 
 在开工之前需要拍板：
 

@@ -6,7 +6,7 @@ import { createMockModel } from './mock-model'
 import { createInterface } from 'node:readline';
 import process from 'node:process';
 import { ToolRegistry } from './tool-registry.ts';
-import { allTools } from './tool/index.ts';
+import { allTools, pickSearchTool } from './tool/index.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
 
 const deepseek = createOpenAI({
@@ -24,7 +24,12 @@ const rl = createInterface({
 })
 
 const registry = new ToolRegistry();
-registry.register(...allTools);
+registry.register(...allTools, pickSearchTool());
+
+const searchProvider = process.env.TAVILY_API_KEY ? 'Tavily (自动挡)'
+                     : process.env.SERPER_API_KEY ? 'Serper (手动挡)'
+                     : '未配置 (默认 Tavily，调用会提示配 key)';
+console.log(`\n[web_search] 当前后端：${searchProvider}`);
 
 console.log(`已注册 ${registry.getAll().length} 个工具：`);
 
