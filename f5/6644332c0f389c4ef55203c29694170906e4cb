@@ -1,0 +1,32 @@
+src/mcp/client.ts
+  s_9686e5b9b33791::t_6dbe3f7bd6b509 43-45
+  s_9686e5b9b33791::t_0dc15e2c8a46b6 83
+src/mcp/mock-client.ts
+  s_9686e5b9b33791::t_449cdb9b7afbd4 1-71
+src/index.ts
+  s_9686e5b9b33791::t_2be31a9d986fba 81-102,105-108
+  s_9686e5b9b33791::t_4ead4d6841a7ed 32-44,48,55-75
+  s_9686e5b9b33791::t_947c304e6c79b6 153
+  s_9686e5b9b33791::t_c54bb9f3d2d65b 11-13
+src/tool-registry.ts
+  s_9686e5b9b33791::t_fae763fb841f56 31,44-51,60-64,68-72,74,76-77,80-81,87-94
+  s_9686e5b9b33791::t_c50809efee124b 52-59,65-67,73,75,78-79,82-86,95-96
+  s_9686e5b9b33791::t_abf2af45c3d480 13,15,18-25,27
+  s_9686e5b9b33791::t_3c7f57f1d5b5fe 14,16-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "f56644332c0f389c4ef55203c29694170906e4cb",
+  "prompts": {},
+  "sessions": {
+    "s_9686e5b9b33791": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5861981a-f677-4d64-9c99-dd64f64aa7af",
+        "model": "arn:aws:bedrock:us-west-2:296122126678:application-inference-profile/uxc50ltr1528"
+      },
+      "human_author": "SuperKatrina123 <yingyuyan@zju.edu.cn>"
+    }
+  }
+}
