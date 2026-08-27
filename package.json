@@ -13,6 +13,7 @@
   "license": "ISC",
   "dependencies": {
     "@ai-sdk/openai": "^3.0.58",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.256",
     "dotenv": "^17.4.2",
     "jsdom": "^27.0.1",

@@ -8,6 +8,9 @@ import process from 'node:process';
 import { ToolRegistry } from './tool-registry.ts';
 import { allTools, pickSearchTool } from './tool/index.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
+import { MCPClient } from './mcp/client.ts';
+import { SDKMCPClient } from './mcp/sdk-client.ts';
+import { MockMCPClient } from './mcp/mock-client.ts';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -26,20 +29,83 @@ const rl = createInterface({
 const registry = new ToolRegistry();
 registry.register(...allTools, pickSearchTool());
 
+async function connectMCP() {
+  const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+
+  // 检测运行环境是否支持 spawn 子进程——部分沙箱环境（浏览器、受限容器）不支持
+  let canSpawn = true;
+  try {
+    const { execSync } = await import('node:child_process');
+    execSync('echo test', { stdio: 'ignore' });
+  } catch {
+    canSpawn = false;
+  }
+
+  if (githubToken && canSpawn) {
+    // MCP_CLIENT_KIND: 'sdk'（默认，生产推荐）| 'handwritten'（教学版，看协议细节）
+    const kind = process.env.MCP_CLIENT_KIND === 'handwritten' ? 'handwritten' : 'sdk';
+    console.log(`\n连接 GitHub MCP Server (client: ${kind})...`);
+    try {
+      const client = kind === 'sdk'
+        ? new SDKMCPClient(
+            'npx', ['-y', '@modelcontextprotocol/server-github'],
+            { GITHUB_PERSONAL_ACCESS_TOKEN: githubToken },
+          )
+        : new MCPClient(
+            'npx', ['-y', '@modelcontextprotocol/server-github'],
+            { GITHUB_PERSONAL_ACCESS_TOKEN: githubToken },
+          );
+      const tools = await registry.registerMCPServer('github', client);
+      console.log(`  已注册 ${tools.length} 个 MCP 工具`);
+      return;
+    } catch (err) {
+      console.log(`  MCP 连接失败: ${err instanceof Error ? err.message : err}`);
+      console.log('  降级为 Mock MCP...');
+    }
+  }
+
+  if (!githubToken) {
+    console.log('\n未配置 GITHUB_PERSONAL_ACCESS_TOKEN，使用 Mock MCP');
+  }
+
+  const mockClient = new MockMCPClient();
+  const tools = await registry.registerMCPServer('github', mockClient);
+  console.log(`  已注册 ${tools.length} 个 Mock MCP 工具`);
+}
+
 const searchProvider = process.env.TAVILY_API_KEY ? 'Tavily (自动挡)'
                      : process.env.SERPER_API_KEY ? 'Serper (手动挡)'
                      : '未配置 (默认 Tavily，调用会提示配 key)';
 console.log(`\n[web_search] 当前后端：${searchProvider}`);
 
-console.log(`已注册 ${registry.getAll().length} 个工具：`);
+async function main() {
+  await connectMCP();
 
-for (const tool of registry.getAll()) {
-  const flags = [
-    tool.isConcurrencySafe ? '可并发' : '串行',
-    tool.isReadOnly ? '只读' : '读写',
-  ].join(', ');
-  console.log(`  - ${tool.name}（${flags}）`);
+  console.log(`\n已注册 ${registry.getAll().length} 个工具：`);
+  for (const tool of registry.getAll()) {
+    const flags = [
+      tool.isConcurrencySafe ? '可并发' : '串行',
+      tool.isReadOnly ? '只读' : '读写',
+    ].join(', ');
+    console.log(`  - ${tool.name}（${flags}）`);
+  }
+
+  // 应用退出前关掉所有 MCP 子进程，避免留下孤儿。SIGINT 也走同一条路径
+  const shutdown = async () => {
+    await registry.closeAllMCP();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  rl.on('close', shutdown);
+
+  console.log('\nRegistey Tools...');
+  ask();
 }
+
+main().catch((err) => {
+  console.error('启动失败:', err);
+  process.exit(1);
+});
 
 const messages: ModelMessage[] = [];
 const SYSTEM = `你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。
@@ -85,6 +151,3 @@ function ask() {
         if (!rl.closed) ask();   // 管道输入 EOF 时 readline 已关闭，跳过避免 ERR_USE_AFTER_CLOSE
     });
 };
-
-console.log('Registey Tools...');
-ask();
