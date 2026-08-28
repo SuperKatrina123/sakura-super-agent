@@ -357,6 +357,8 @@ const MIME: Record<string, string> = {
 export const startPreviewTool: ToolDefinition = {
   name: 'start_preview',
   description: '启动 app/ 目录的预览服务器。生成应用文件后必须立即调用此工具',
+  shouldDefer: true,
+  searchHint: 'start preview server vibe coding app 启动 预览 服务器',
   parameters: {
     type: 'object',
     properties: { port: { type: 'number' } },
@@ -405,6 +407,8 @@ export const startPreviewTool: ToolDefinition = {
 export const tavilySearchTool: ToolDefinition = {
   name: 'web_search',
   description: '搜索互联网获取最新信息。返回相关网页的标题、链接和内容摘要',
+  shouldDefer: true,
+  searchHint: 'web search internet google 搜索 互联网 网页',
   parameters: {
     type: 'object',
     properties: {
@@ -459,6 +463,8 @@ export const tavilySearchTool: ToolDefinition = {
 export const serperSearchTool: ToolDefinition = {
   name: 'web_search',
   description: '搜索互联网获取最新信息。返回 Google 搜索结果的标题、链接和摘要',
+  shouldDefer: true,
+  searchHint: 'web search internet google 搜索 互联网 网页',
   parameters: {
     type: 'object',
     properties: {
@@ -526,6 +532,8 @@ export function pickSearchTool(): ToolDefinition {
 export const webFetchTool: ToolDefinition = {
   name: 'web_fetch',
   description: '抓取指定 URL 的网页内容，转换为 Markdown 格式（保留标题、列表、代码块、链接等结构）',
+  shouldDefer: true,
+  searchHint: 'web fetch url content markdown scrape 抓取 网页 内容',
   parameters: {
     type: 'object',
     properties: {

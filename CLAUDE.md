@@ -80,6 +80,7 @@ try {
 - [docs/research-agent-practice.md](docs/research-agent-practice.md) — Research Agent 实践
 - [docs/vibe-coding-practice.md](docs/vibe-coding-practice.md) — Vibe Coding 实践
 - [docs/mcp-integration-practice.md](docs/mcp-integration-practice.md) — MCP 集成实践（stdio 传输、ToolRegistry 融合、三层降级）
+- [docs/tool-search-design.md](docs/tool-search-design.md) — ToolSearch 延迟加载（Profile vs Lazy、Prompt Cache 权衡）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线
 - [docs/tool-call-concurrency.md](docs/tool-call-concurrency.md) — 工具读写锁

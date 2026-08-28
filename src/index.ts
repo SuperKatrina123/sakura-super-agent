@@ -7,6 +7,8 @@ import { createInterface } from 'node:readline';
 import process from 'node:process';
 import { ToolRegistry } from './tool-registry.ts';
 import { allTools, pickSearchTool } from './tool/index.ts';
+import { simulatedMcpTools } from './tool/simulated-mcp.ts';
+import { createToolSearchTool } from './tool/tool-search.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
 import { MCPClient } from './mcp/client.ts';
 import { SDKMCPClient } from './mcp/sdk-client.ts';
@@ -28,6 +30,8 @@ const rl = createInterface({
 
 const registry = new ToolRegistry();
 registry.register(...allTools, pickSearchTool());
+// 元工具 tool_search 必须最后注册——需要闭包 registry 引用
+registry.register(createToolSearchTool(registry));
 
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
@@ -73,6 +77,13 @@ async function connectMCP() {
   console.log(`  已注册 ${tools.length} 个 Mock MCP 工具`);
 }
 
+// 制造工具膨胀场景——注入 11 个模拟 MCP 工具（notion / browser / supabase）
+// 全部 shouldDefer: true，用来演示"工具太多时 ToolSearch 的价值"
+function registerSimulatedTools() {
+  registry.register(...simulatedMcpTools);
+  console.log(`\n注入 ${simulatedMcpTools.length} 个模拟 MCP 工具（全部 shouldDefer）`);
+}
+
 const searchProvider = process.env.TAVILY_API_KEY ? 'Tavily (自动挡)'
                      : process.env.SERPER_API_KEY ? 'Serper (手动挡)'
                      : '未配置 (默认 Tavily，调用会提示配 key)';
@@ -80,15 +91,18 @@ console.log(`\n[web_search] 当前后端：${searchProvider}`);
 
 async function main() {
   await connectMCP();
+  registerSimulatedTools();
 
-  console.log(`\n已注册 ${registry.getAll().length} 个工具：`);
-  for (const tool of registry.getAll()) {
-    const flags = [
-      tool.isConcurrencySafe ? '可并发' : '串行',
-      tool.isReadOnly ? '只读' : '读写',
-    ].join(', ');
-    console.log(`  - ${tool.name}（${flags}）`);
-  }
+  const allCount = registry.getAll().length;
+  const activeTools = registry.getActiveTools();
+  const estimate = registry.countTokenEstimate();
+
+  console.log(`\n=== 工具统计 ===`);
+  console.log(`  全部工具: ${allCount} 个`);
+  console.log(`  活跃工具: ${activeTools.length} 个（直接进 system prompt）`);
+  console.log(`  延迟工具: ${allCount - activeTools.length} 个（走 tool_search 按需激活）`);
+  console.log(`  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`);
+  console.log(`  节省比例: ~${Math.round(estimate.deferred / estimate.total * 100)}%`);
 
   // 应用退出前关掉所有 MCP 子进程，避免留下孤儿。SIGINT 也走同一条路径
   const shutdown = async () => {
@@ -146,7 +160,10 @@ function ask() {
 
         messages.push({ role: 'user', content: trimmed });
 
-        await agentLoop(model, registry, messages, SYSTEM, budget);
+        // 每轮都重新拼 SYSTEM——因为 discoveredTools 可能变，defer 目录要跟着更新
+        // （已发现的工具会从目录里消失，避免模型重复搜索）
+        const dynamicSystem = SYSTEM + registry.getDeferredToolSummary();
+        await agentLoop(model, registry, messages, dynamicSystem, budget);
 
         if (!rl.closed) ask();   // 管道输入 EOF 时 readline 已关闭，跳过避免 ERR_USE_AFTER_CLOSE
     });
