@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"，以及一套带并发控制的工具系统。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、以及应对工具膨胀的 ToolSearch 延迟加载。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -82,7 +82,7 @@
 
 **实现**：[`src/agent/loop.ts`](src/agent/loop.ts)
 
-- **预算由调用方持有**：`src/index.ts` 里的 `{ used: 0, limit: 15000 }` 跨轮持续累计，`agentLoop` 只负责消费它
+- **预算由调用方持有**：`src/index.ts` 里的 `{ used: 0, limit: 600000 }` 跨轮持续累计，`agentLoop` 只负责消费它
 - 每步把 `input + output` token 累加进 `budget.used`，实时打印 `used/limit (pct%)`
 - 超过 `limit` → 打印提示并**强制停止**
 
@@ -94,25 +94,108 @@
 
 > 📖 本节只是速览。想复习实现细节（读写锁的三个状态变量怎么工作、结果截断为什么必要、每个工具声明了哪些并发属性、工具执行层与三道防线的分工），见 [docs/tool-call-concurrency.md](docs/tool-call-concurrency.md)。
 
-三道防线防的是**循环层面**的故障；工具系统管的是**工具执行层**。目前已注册 11 个工具（[`src/tool/index.ts`](src/tool/index.ts)）：
+三道防线防的是**循环层面**的故障；工具系统管的是**工具执行层**。目前已注册 12 个内置工具（[`src/tool/index.ts`](src/tool/index.ts)）：
 
-| 工具 | 说明 | 并发属性 |
-|---|---|---|
-| `get_weather` | 查城市天气（假数据） | 可并发 · 只读 |
-| `calculator` | 计算数学表达式 | 串行（未声明，走保守默认） |
-| `read_file` | 读文件 | 可并发 · 只读 |
-| `write_file` | 写文件 | 串行 · 读写 |
-| `list_directory` | 列目录 | 可并发 · 只读 |
-| `edit_file` | 精确替换文件片段（非全量覆写） | 串行 · 读写 |
-| `bash` | 执行 shell 命令 | 串行 · 读写 |
-| `grep` | 按正则搜文件内容 | 可并发 · 只读 |
-| `glob` | 按通配符搜文件 | 可并发 · 只读 |
-| `fetch_url` | 抓网页并转纯文本 | 可并发 · 只读 |
-| `start_preview` | 启动 app/ 目录预览服务器 | 串行 · 读写 |
+| 工具 | 说明 | 并发属性 | 加载 |
+|---|---|---|---|
+| `get_weather` | 查城市天气（假数据） | 可并发 · 只读 | 立即 |
+| `calculator` | 计算数学表达式 | 串行（未声明，走保守默认） | 立即 |
+| `read_file` | 读文件 | 可并发 · 只读 | 立即 |
+| `write_file` | 写文件 | 串行 · 读写 | 立即 |
+| `list_directory` | 列目录 | 可并发 · 只读 | 立即 |
+| `edit_file` | 精确替换文件片段（非全量覆写） | 串行 · 读写 | 立即 |
+| `bash` | 执行 shell 命令 | 串行 · 读写 | 立即 |
+| `grep` | 按正则搜文件内容 | 可并发 · 只读 | 立即 |
+| `glob` | 按通配符搜文件 | 可并发 · 只读 | 立即 |
+| `web_search` | 联网搜索（Tavily / Serper） | 可并发 · 只读 | **延迟** |
+| `web_fetch` | 抓网页并转 Markdown | 可并发 · 只读 | **延迟** |
+| `start_preview` | 启动 app/ 目录预览服务器 | 串行 · 读写 | **延迟** |
+
+外加一个元工具 `tool_search`（详见下面的 ToolSearch 章节）。
 
 - **读写锁**（[`src/tool-registry.ts`](src/tool-registry.ts)）：只读工具并行执行，有副作用的工具串行执行——独占锁必须等所有共享锁释放。用三个状态变量手写，约 40 行，零依赖。
 - **结果截断**：工具返回值超过 `maxResultChars` 时保留头尾、丢弃中间并提示，防止长网页/日志把上下文撑爆。
 - **声明即纪律**：每个工具用 `isConcurrencySafe` / `isReadOnly` 声明并发属性，`ToolRegistry` 据此决定拿共享锁还是独占锁。保守默认：不声明就按串行走——宁可慢，不可错。
+- **延迟加载**：`shouldDefer: true` 的工具默认不进 system prompt，由 `tool_search` 元工具按需激活——见下节。
+
+## 🔌 MCP 集成
+
+> 📖 本节只是速览。完整实现（stdio 传输、JSON-RPC id-map、握手时序、三层降级、手写 vs 官方 SDK 对比），见 [docs/mcp-integration-practice.md](docs/mcp-integration-practice.md)。
+
+工具集有天花板——真正的能力扩张来自 **MCP (Model Context Protocol)**：任何工具提供方按协议实现一个 server，任何 client 都能直接接入。项目里挂上一个 GitHub MCP server 就能获得 26 个真实 GitHub 工具。
+
+**核心决策**：抽象出 `MCPClientLike` 结构接口，让所有 MCP client 实现（手写 stdio / 官方 SDK / Mock 降级）在 `ToolRegistry` 眼里都长一个样——**换实现零改动**。
+
+三种 MCP client 并存：
+
+| 实现 | 位置 | 用途 |
+|---|---|---|
+| **手写 stdio 版** | [`src/mcp/client.ts`](src/mcp/client.ts) | 教学载体：110 行看清 JSON-RPC + stdio + id-map 全流程 |
+| **官方 SDK 版** | [`src/mcp/sdk-client.ts`](src/mcp/sdk-client.ts) | 生产推荐：`@modelcontextprotocol/sdk` 帮你处理握手 / 超时 / 版本协商 |
+| **Mock 降级版** | [`src/mcp/mock-client.ts`](src/mcp/mock-client.ts) | 三层降级兜底：真实 server 起不来时不阻塞主流程 |
+
+env switch 二选一：
+
+```bash
+MCP_CLIENT_KIND=sdk npm start          # 默认，生产推荐
+MCP_CLIENT_KIND=handwritten npm start  # 教学版
+```
+
+两种模式下**注册的工具数、Agent Loop 的行为、工具调用结果完全一致**——26 个 GitHub 工具、38 个总工具。这就是 `MCPClientLike` 抽象成立的证据：`ToolRegistry.registerMCPServer` 一行不用改。
+
+**工具名前缀**：`mcp__<serverName>__<toolName>`（跟 Claude Code 一致），避免多 server 同名冲突。执行时闭包脱前缀，发给 server 的是原始 name。
+
+## 🔍 ToolSearch 延迟加载
+
+> 📖 本节只是速览。想复习完整设计（Profile vs Lazy Loading、判定标准、Prompt Cache 权衡矩阵），见 [docs/tool-search-design.md](docs/tool-search-design.md)。
+
+**问题**：接了 MCP 后工具数轻松破 40。全部 schema 塞进 system prompt 有两个痛：
+- **显性痛**：token 成本（50 个工具 ≈ 5500 tokens 常驻）
+- **隐性痛**：模型面对几十个语义相邻的工具选错概率显著上升
+
+**类比**：把工具集加一层搜索引擎——不需要把所有商品摆在货架上，顾客要什么搜一下就行。
+
+### 三个字段搭起来的机制
+
+在 `ToolDefinition` 上加两个字段：
+
+```ts
+shouldDefer?: boolean;    // 是否延迟加载
+searchHint?: string;       // 检索关键词（不进 prompt，只喂给 searchTools）
+```
+
+加一个元工具 `tool_search`（[`src/tool/tool-search.ts`](src/tool/tool-search.ts)）：
+
+```
+system prompt 尾巴挂 defer 目录（工具名 + hint 列表）
+                ↓
+模型看到 → 判断需要 mcp__github__list_issues → 调 tool_search
+                ↓
+registry.searchTools() 精确名字匹配 → 加入 discoveredTools
+                ↓
+下一轮 tools 参数里出现该工具 → 模型直接调用
+```
+
+**一步式激活**（搜索即激活）而非两步式（search + load）——省一次 round-trip，接近 Claude Code 的做法。
+
+### 实测效果
+
+启动时自动统计：
+
+```
+=== 工具统计 ===
+  全部工具: 50 个
+  活跃工具: 10 个（直接进 system prompt）
+  延迟工具: 40 个（走 tool_search 按需激活）
+  Token 估算: ~654 (活跃) + ~4881 (延迟，不占 prompt)
+  节省比例: ~88%
+```
+
+单轮账：naive 全量 ≈ 5535 tokens，ToolSearch ≈ 1654 tokens（含 defer 目录 + 元工具调用），**净省 ~70%/轮**。
+
+### 一个诚实的 tradeoff
+
+动态改 `tools` 参数会让 Prompt Cache 前几轮失效——但工具发现集中在对话前几轮，属于**一次性折损**而非持续损失。Claude Code 用 Anthropic 的 `defer_loading` beta 完全避开 cache 问题，但那是 Anthropic 独有，模型无关的项目用不了。生产推荐我们这个做法：**用原生 tools 列表做延迟加载，稳定性更有保障**。
 
 ## 快速开始
 
@@ -140,27 +223,35 @@ npm start        # 直接运行
 
 ```
 src/
-├── index.ts                 # 入口：readline REPL，持有 messages 与 budget
+├── index.ts                 # 入口：readline REPL，持有 messages 与 budget，挂 MCP + 元工具
 ├── agent/
 │   └── loop.ts              # Agent Loop：while 循环 + 步骤级重试 + 防护接入
 ├── loop-detection.ts        # 循环检测：指纹 + 滑动窗口 + 三个检测器
 ├── retry.ts                 # API 容错：错误分类 + 指数退避 + 抖动
 ├── mock-model.ts            # Mock 模型：模拟工具调用 / 死循环 / 429 / 超预算 / 并发 / 编辑
-├── tool-registry.ts         # 工具注册表：读写锁 + 结果截断 + 包装成 AI SDK 工具格式
-└── tool/
-    └── index.ts             # 内置工具：已注册的 11 个工具（天气/计算/文件/bash/grep/glob/抓网页/预览）
+├── tool-registry.ts         # 工具注册表：读写锁 + 结果截断 + MCP 挂载 + 延迟加载状态
+├── tool/
+│   ├── index.ts             # 12 个内置工具（天气/计算/文件/bash/grep/glob/搜索/抓网页/预览）
+│   ├── tool-search.ts       # 元工具 tool_search：按名字激活延迟工具
+│   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
+└── mcp/
+    ├── client.ts            # 手写 stdio MCP client（教学载体）
+    ├── sdk-client.ts        # 官方 SDK 版本（生产推荐）
+    └── mock-client.ts       # Mock 降级实现
 
 docs/
 ├── agent-loop-protections.md    # 三道防护的完整实现细节
-└── tool-call-concurrency.md     # 工具调用并发控制详解
+├── tool-call-concurrency.md     # 工具调用并发控制详解
+├── mcp-integration-practice.md  # MCP 集成实践（stdio / SDK / 三层降级）
+└── tool-search-design.md        # ToolSearch 延迟加载（含 Prompt Cache 权衡）
 ```
-
-（`src/tool/utility-tools.ts` 是最早两个工具的遗留快照，已被 `tool/index.ts` 取代，已删除；老版本仍在 [`history/`](history/) 保留）
 
 ## 核心设计
 
 - **Provider 模式**：无论后端是 mock 还是真实 API，`streamText({ model, ... })` 的调用方式完全一致，模型可插拔，核心业务逻辑与具体模型解耦
 - **全量上下文传递**：对话上下文就是 `messages: ModelMessage[]`，每轮把整个数组传给模型，不做压缩、截断或缓存
 - **防护旁路接入**：检测器、重试、预算都在 `agentLoop` 内部编排，模型对防护毫无感知
-- **预算归属清晰**：`budget` 由调用方持有并跨轮累计，`agentLoop` 只读改写它——想换预算策略，不需要动循环本身
+- **预算归属清晰**:`budget` 由调用方持有并跨轮累计，`agentLoop` 只读改写它——想换预算策略，不需要动循环本身
 - **工具层并发控制**：读写锁由 `ToolRegistry` 持有，`agentLoop` 对锁毫无感知——循环管"要不要调"（三道防线），工具层管"怎么安全地调"（读写锁）
+- **工具来源解耦**：`MCPClientLike` 结构接口把 MCP client 的实现（手写 / SDK / Mock）藏在 `ToolRegistry` 后面——`agentLoop.ts` 从头到尾看不到 "MCP" 这个词，加一种新来源不用改循环
+- **工具可见性动态化**：`shouldDefer` + `discoveredTools` 让工具集从"静态注册"变成"按需暴露"——registry 决定当下哪些工具进 prompt，`agentLoop` 只消费 `toAISDKFormat()` 的输出，同样毫无感知
