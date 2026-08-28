@@ -1,0 +1,19 @@
+README.md
+  s_fae99ab294621d::t_0e011fe8d3bdee 254,256-257
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "686f3b2c93e3cfbedfc3f305b70478cb7b6cf0cf",
+  "prompts": {},
+  "sessions": {
+    "s_fae99ab294621d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a047a1-b00f-74a1-8f84-74c88ab11ac7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "SuperKatrina123 <yingyuyan@zju.edu.cn>"
+    }
+  }
+}
