@@ -100,12 +100,12 @@ async function main() {
   const activeTools = registry.getActiveTools();
   const estimate = registry.countTokenEstimate();
 
-  console.log(`\n=== 工具统计 ===`);
-  console.log(`  全部工具: ${allCount} 个`);
-  console.log(`  活跃工具: ${activeTools.length} 个（直接进 system prompt）`);
-  console.log(`  延迟工具: ${allCount - activeTools.length} 个（走 tool_search 按需激活）`);
-  console.log(`  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`);
-  console.log(`  节省比例: ~${Math.round(estimate.deferred / estimate.total * 100)}%`);
+//   console.log(`\n=== 工具统计 ===`);
+//   console.log(`  全部工具: ${allCount} 个`);
+//   console.log(`  活跃工具: ${activeTools.length} 个（直接进 system prompt）`);
+//   console.log(`  延迟工具: ${allCount - activeTools.length} 个（走 tool_search 按需激活）`);
+//   console.log(`  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`);
+//   console.log(`  节省比例: ~${Math.round(estimate.deferred / estimate.total * 100)}%`);
 
   // Prompt Pipe 启动时打一次——用当前状态（工具都注册完 + session 恢复完）预览 SYSTEM 长啥样
   // 每轮的实时 debug 目前不打，需要时可以在 ask() 里加 promptBuilder.debug(ctx)

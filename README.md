@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、以及模块化 SYSTEM 的 Prompt Pipe。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、以及长会话压缩的 Microcompact + Summarization 两层策略。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -264,6 +264,46 @@ const promptBuilder = new PromptBuilder()
 
 `[OFF]` 显式列出——**Pipe 模式的按需出现**变得可见。加新 segment 就是加一行 `.pipe()`，条件逻辑内嵌在 segment 里、零字符串屎山。
 
+## 🗜️ 上下文压缩
+
+> 📖 本节只是速览。完整设计（三类内容的可压缩性、表格化 prompt 的关键、级联压缩、user 边界对齐），见 [docs/context-compression.md](docs/context-compression.md)。
+
+**问题**：长会话里 `messages` 数组无限增长。工具密集任务里 100 轮就顶到模型 context 窗（128k）——**API 直接 400 拒绝**，不是性能问题是能不能工作的问题。
+
+**核心洞察**：`messages` 里三类内容可压缩性完全不同——
+
+| 类别 | 大小占比 | 可压缩性 |
+|---|---|---|
+| SYSTEM prompt（Prompt Pipe 拼出来的） | 5-15% | **不能压** |
+| 对话历史（user + assistant text） | 15-25% | 难压 |
+| **工具调用记录**（tool_call + tool_result） | **60-80%** | **好压** |
+
+**分层策略**：先便宜后贵、能保结构不摘要。
+
+**Layer 1：Microcompact** — 零 LLM 调用，把旧的**查询类**工具结果（`read_file` / `list_issues` / ...）替换成 `[tool result cleared]`。保留消息结构、工具名、assistant 结论。副作用类工具（`create_issue` / `write_file` / ...）永不清——它们的返回值可能是未来操作的锚点。
+
+**Layer 2：Summarization** — Microcompact 之后 context 仍超阈值（默认 6k tokens，生产建议 60k），调 LLM 把老对话压成一段**结构化摘要**：
+
+```
+## 用户意图
+## 已完成的操作
+## 关键发现
+## 当前状态
+## 需要保留的细节
+```
+
+**关键洞见**：**给模型一个表格让它填，而不是让它自由写作**。表格越具体，压缩结果越稳定——次次结构一致、下游可稳定利用。这是 Manus 分享过的最佳实践。
+
+**级联压缩**：每次压缩把上一次的摘要一起再压——任何时刻 messages[0] 只有一段摘要，摘要是"滚动更新的历史"、不是"堆积的段落"。caller 只传 messages 即可、无需管状态——`summarize()` 内部自动从 messages[0] 提取上次摘要。
+
+日志：
+
+```
+--- Step 5 ---
+  [Microcompact] 清理了 3 个旧工具结果             ← 零成本、每轮跑
+  [Summarize] 压缩了 12 条老对话为摘要（684 字符）  ← 超阈值才跑
+```
+
 ## 快速开始
 
 ```bash
@@ -306,7 +346,9 @@ src/
 │   ├── sdk-client.ts        # 官方 SDK 版本（生产推荐）
 │   └── mock-client.ts       # Mock 降级实现
 ├── session/
-│   └── store.ts             # JSONL append-only 存储 + load / stats
+│   ├── store.ts             # JSONL append-only 存储 + load / stats
+│   ├── tool-result-output.ts # AI SDK 5 判别联合的工具结果编解码
+│   └── compressor.ts        # 两层压缩：microcompact + summarize
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     └── segments.ts          # 4 个默认 segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -317,7 +359,8 @@ docs/
 ├── mcp-integration-practice.md  # MCP 集成实践（stdio / SDK / 三层降级）
 ├── tool-search-design.md        # ToolSearch 延迟加载（含 Prompt Cache 权衡）
 ├── session-persistence.md       # Session 持久化（JSONL、崩溃安全、恢复语义）
-└── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
+├── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
+└── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
 ```
 
 ## 核心设计
@@ -331,3 +374,4 @@ docs/
 - **工具可见性动态化**：`shouldDefer` + `discoveredTools` 让工具集从"静态注册"变成"按需暴露"——registry 决定当下哪些工具进 prompt，`agentLoop` 只消费 `toAISDKFormat()` 的输出，同样毫无感知
 - **状态持久化用 append-only**：`SessionStore` 用 JSONL append，崩溃时最多丢正在写的那一行——比"覆写整个文件"的一致性窗口小几个数量级
 - **SYSTEM 是 pipeline，不是字符串**：`PromptBuilder` 把 SYSTEM 拆成 segment，每个 segment 是纯函数、独立决定要不要出现——加新功能是加 `.pipe()`，不是拼字符串
+- **上下文压缩分层，先便宜后贵**：Microcompact（零 LLM、无损结构）永远先于 Summarization（一次 LLM 调用、结构塌陷）——能不丢结构就不丢。压缩逻辑挂在 `agentLoop` 里，caller 无感、幂等可反复触发

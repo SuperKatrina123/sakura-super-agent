@@ -1,4 +1,5 @@
 import { streamText, type ModelMessage } from 'ai';
+import { microcompact, summarize, estimateTokens } from '../session/compressor.js';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection.ts';
 import { isRetryable, calculateDelay, sleep } from './retry.ts';
 import { ToolRegistry } from '../tools/tool-registry.ts';
@@ -26,6 +27,46 @@ export async function agentLoop(
     step++;
     console.log(`\n--- Step ${step} ---`);
 
+    // ─── 上下文压缩：Microcompact → Summarize，前后各打 tokens 让效果可见 ─────
+    // 只在本轮真的发生了压缩时才打 log，避免每轮都刷屏
+    // "压缩前"的数字放在第一次真正生效的动作之前打——保持日志块紧凑
+    const beforeCount = messages.length;
+    const beforeTokens = estimateTokens(messages);
+
+    // Layer 1：Microcompact（零成本、幂等——反复跑不会误清）
+    // 原地修改 messages 保持外部引用一致（index.ts / SessionStore 都指向同一个数组）
+    const { messages: compacted, cleared } = microcompact(messages);
+    let didAnything = false;
+    if (cleared > 0) {
+      messages.splice(0, messages.length, ...compacted);
+      didAnything = true;
+    }
+    const afterMicroTokens = estimateTokens(messages);
+
+    // Layer 2：Summarize（只在超阈值时才调 LLM，未超时 compressedCount=0）
+    const summarizeResult = await summarize(model, messages);
+    if (summarizeResult.compressedCount > 0) {
+      messages.splice(0, messages.length, ...summarizeResult.messages);
+      didAnything = true;
+    }
+    const afterSummarizeTokens = estimateTokens(messages);
+
+    if (didAnything) {
+      console.log(`\n[压缩前] ${beforeCount} 条消息, ~${beforeTokens} tokens`);
+      if (cleared > 0) {
+        console.log(`[Layer 1: Microcompact] 清理了 ${cleared} 个工具结果, ~${afterMicroTokens} tokens`);
+      }
+      if (summarizeResult.compressedCount > 0) {
+        console.log(`[Layer 2: Summarization] 压缩了 ${summarizeResult.compressedCount} 条消息, ~${afterSummarizeTokens} tokens`);
+        // 摘要预览：只打前 100 字符，够看结构够看是否符合模板、不刷屏
+        const preview = summarizeResult.summary.slice(0, 100).replace(/\n/g, ' ');
+        const truncated = summarizeResult.summary.length > 100 ? '...' : '';
+        console.log(`[摘要预览] ${preview}${truncated}`);
+      }
+      console.log(`[压缩后] ${messages.length} 条消息, ~${afterSummarizeTokens} tokens\n`);
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     let hasToolCall = false;
     let fullText = '';
     let shouldBreak = false;
@@ -48,7 +89,7 @@ export async function agentLoop(
             case 'tool-call': {
               hasToolCall = true;
               lastToolCall = { name: part.toolName, input: part.input };
-              console.log(`  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`);
+              // console.log(`  [调用: ${part.toolName}(${JSON.stringify(part.input)})]`);
 
               const detection = detect(part.toolName, part.input);
               if (detection.stuck) {
@@ -67,7 +108,7 @@ export async function agentLoop(
             }
 
             case 'tool-result':
-              console.log(`  [结果: ${JSON.stringify(part.output)}]`);
+              // console.log(`  [结果: ${JSON.stringify(part.output)}]`);
               if (lastToolCall) {
                 recordResult(lastToolCall.name, lastToolCall.input, part.output);
               }

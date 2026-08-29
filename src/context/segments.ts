@@ -7,10 +7,13 @@ import type { PromptContext } from './prompt-builder.ts';
 type PipeFn = (ctx: PromptContext) => string | null;
 
 // 身份 + 工具搜索引导——永远不变，最先出现（cache 命中率最高）
+// 第 4 行是给"摘要消息"用的——历史对话被压缩后会作为 [以下是之前对话的压缩摘要] 开头的
+// user 消息注入到 messages 里，模型要知道那不是用户新说的话、而是历史注入
 export function coreRules(): PipeFn {
   return () => `你是 Super Agent，一个有工具调用能力的 AI 助手。
 你有内置工具和 MCP 工具可用。
-如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。`;
+如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。
+如果 messages 里出现 [以下是之前对话的压缩摘要] 开头的消息，那是历史对话的摘要（不是用户新说的话），你需要基于摘要继续对话，无需对它做回应。`;
 }
 
 // 工具数量提示——让模型对当前可用能力有个数
