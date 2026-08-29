@@ -10,7 +10,8 @@
 - [3. Layer 2：Summarization——LLM 摘要压缩](#3-layer-2summarizationllm-摘要压缩)
 - [4. 分层策略：先便宜后贵、能保结构不摘要](#4-分层策略先便宜后贵能保结构不摘要)
 - [5. 级联压缩：不让摘要堆积成新的膨胀源](#5-级联压缩不让摘要堆积成新的膨胀源)
-- [6. 已知的坑与后续方向](#6-已知的坑与后续方向)
+- [6. 稳定性保障：四个必踩的坑](#6-稳定性保障四个必踩的坑)
+- [7. 已知的坑与后续方向](#7-已知的坑与后续方向)
 
 ## 0. 为什么长会话会撞墙
 
@@ -395,7 +396,129 @@ const userPrompt = existingSummary
 
 **给压缩 LLM 看的**：明确区分"已有摘要"和"新对话"——让它知道**要把两者合并成新的一段**，而不是并列地保留两段。
 
-## 6. 已知的坑与后续方向
+## 6. 稳定性保障：四个必踩的坑
+
+前面 §2-§5 讲的是**压缩怎么工作**。这一节讲**压缩怎么"不出事"**——生产环境跑久了才会暴露的稳定性问题。
+
+**四个支柱**：标识符保护、失败降级、模型选型、触发阈值。当前项目是教学定位——每个支柱**思路已经落地**，但**生产化的完整实现**部分留作待办。这一节讲清"每个支柱当前做了什么、生产该补什么"。
+
+### 6.1 标识符保护——已实现
+
+**问题**：对话里的 `src/tool-registry.ts` 这类路径，模型在摘要里可能"翻译"成"工具注册文件"。后续对话模型就找不到这个文件了。UUID、版本号、错误信息同理。
+
+**解法**：在压缩 Prompt 里明确要求原样保留。代码在 [`compressor.ts:110`](../src/session/compressor.ts#L110)：
+
+```
+- 文件路径、UUID、版本号等标识符必须原样保留，不要翻译或改写
+```
+
+**当前状态**：✅ **已做**——这是 §3.2 讲的"标识符保护"，直接落在 prompt 里。
+
+**生产补充**：如果发现某类模型仍然会改写，可以加**后置校验**——比较摘要前后的路径正则命中集合，缺失的路径手动"钉"回去。这一层教学项目没做。
+
+### 6.2 失败降级——**待做**
+
+**问题**：`generateText()` 会失败——网络抖动、模型 rate limit、超时、上游 5xx。当前代码 [`compressor.ts:242`](../src/session/compressor.ts#L242) 直接 `await`、没 catch。
+
+```ts
+const { text: summary } = await generateText({ ... });   // ← 失败会抛异常向上传播
+```
+
+抛异常 → `agentLoop` 里也没 catch → **整个 loop 崩掉**。
+
+**生产该做**：包 try-catch，失败返回**原始 messages**（`compressedCount: 0`）——**压缩失败不能影响 Agent 的正常工作**。
+
+```ts
+try {
+  const { text: summary } = await generateText({ ... });
+  return { messages: [...], summary, compressedCount: toCompress.length };
+} catch (err) {
+  console.warn(`[Summarize] LLM 调用失败，跳过本次压缩: ${err}`);
+  return { messages, summary: '', compressedCount: 0 };   // 原样返回
+}
+```
+
+**进一步**：加**连续失败计数**——像 Claude Code 的 Auto-compact 那样，连续 3 次失败就**放弃压缩、不再尝试**（避免每轮 loop 都重试一次失败的调用）。可以在 `summarize()` 内部维护 `let consecutiveFailures = 0`、超过阈值时直接返回原样、日志提示用户"压缩机制已禁用，请检查配置"。
+
+**当前状态**：❌ **未做**——教学项目里"压缩失败 = 明显崩溃"反而有教学价值（能看到出问题），生产必须补。
+
+### 6.3 便宜模型做压缩——**待做**
+
+**问题**：当前用主 agent 的 model 做压缩（[`agent/loop.ts:42`](../src/agent/loop.ts#L42)）：
+
+```ts
+const summarizeResult = await summarize(model, messages);
+//                                       ↑ 主力模型（DeepSeek-V4 / GPT-5 / Claude Opus 5）
+```
+
+一次摘要输入可能几千到几万 tokens、输出 800 字左右——**用主力模型这一次调用要几分钱**。长会话累计触发几十次——**成本可观**。
+
+**核心洞察**：**压缩不需要复杂推理能力**——它只是"按模板填表"。摘要 prompt 已经把结构规定得死死的，模型不需要思考、只需要把对话内容映射到 5 个字段里。这个任务 Haiku 4.5 / Gemini Flash / DeepSeek 的小版本都能干、成本 1/10 起。
+
+**Claude Code 的做法**：Auto-compact **用的不是 Opus 而是 Haiku**——同样思路。
+
+**生产该做**：API 演进而非重构——
+
+```ts
+export async function summarize(
+  model: LanguageModel,
+  messages: ModelMessage[],
+  options?: { compactModel?: LanguageModel },   // ← 可选参数
+): Promise<CompactionResult> {
+  const compactModel = options?.compactModel ?? model;   // 没传就 fallback 到主模型
+  // ...
+  const { text: summary } = await generateText({
+    model: compactModel,   // ← 用便宜模型
+    system: COMPRESS_PROMPT,
+    prompt: userPrompt,
+  });
+}
+```
+
+**当前状态**：❌ **未做**——教学项目里用一个模型简单直接；生产该加。
+
+### 6.4 触发阈值——**当前是调试值**
+
+**问题**：阈值设太低 → 频繁压缩，每次都调 LLM 浪费钱；设太高 → 来不及压缩就溢出 context window，API 直接 400。
+
+**Claude Code 的经验值**：**上下文窗口的 87%**。200k window → 174k 阈值、128k window → 111k 阈值。
+
+**当前状态**：⚠️ **调试值 6000 tokens**（[`compressor.ts:93`](../src/session/compressor.ts#L93)）——目的是让长会话很快就触发一次 `[Summarize]`、方便观察机制。
+
+**生产该做**：根据你的模型 context window 算：
+
+```ts
+// 不同模型的推荐阈值（约上下文窗口 × 87%）
+const CONTEXT_TOKEN_THRESHOLD_TABLE = {
+  'deepseek-v4': 111_000,      // 128k × 87%
+  'gpt-5':        174_000,      // 200k × 87%
+  'claude-opus-5': 174_000,     // 200k × 87%
+  'claude-haiku-4-5': 174_000,  // 200k × 87%
+};
+```
+
+**87% 而不是 100% 的原因**：留出**Layer 2 摘要输出的空间**——如果卡到 100% 才触发，摘要生成时会撑爆 window、请求直接 fail。**87% 留 13% 给"压缩本身的运行开销"**。
+
+**当前项目改法**：环境变量控制、可以按环境切换：
+
+```ts
+const CONTEXT_TOKEN_THRESHOLD = Number(process.env.COMPACT_THRESHOLD) || 6000;
+```
+
+Dev 用 6000 立即触发、prod 环境 export 到 174000。
+
+### 6.5 稳定性四支柱总结
+
+| 支柱 | 当前项目 | 生产必做 |
+|---|---|---|
+| 标识符保护 | ✅ prompt 里明确要求 | prompt + 后置正则校验 |
+| 失败降级 | ❌ 直接抛异常 | try-catch + 连续失败计数 |
+| 便宜模型 | ❌ 用主模型 | API 加可选 `compactModel` 参数 |
+| 触发阈值 | ⚠️ 6000（调试值） | context window × 87% |
+
+**这四个支柱共同保证：压缩机制 fail 时 Agent 不崩、压缩成本可控、压缩效果稳定。**
+
+## 7. 已知的坑与后续方向
 
 **1. `extractExistingSummary` 依赖字符串前缀**
 
