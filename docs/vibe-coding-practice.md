@@ -84,7 +84,7 @@ app/
 三处：
 
 1. **预置 `app/index.html`**（importmap + Babel + 手写 loader）
-2. **修 [src/tool/index.ts](../src/tool/index.ts) 里 MIME 表**：`.tsx` 和 `.ts` 改成 `text/plain`，让 Babel 拿到原文本自己编译（不是让浏览器尝试执行 JSX）
+2. **修 [src/tools/index.ts](../src/tools/index.ts) 里 MIME 表**：`.tsx` 和 `.ts` 改成 `text/plain`，让 Babel 拿到原文本自己编译（不是让浏览器尝试执行 JSX）
 3. **SYSTEM prompt 加 Vibe Coding 引导**：
    - 只能写 `app/*.tsx` 和 `app/*.css`
    - **不要动 `index.html`**
@@ -202,7 +202,7 @@ start_preview           → 等所有 write_file 完成
 
 ### ⚠️ 1. `.tsx` 的 MIME type 必须是 `text/plain`
 
-看 [src/tool/index.ts](../src/tool/index.ts) MIME 表：
+看 [src/tools/index.ts](../src/tools/index.ts) MIME 表：
 
 ```ts
 '.tsx': 'text/plain; charset=utf-8',
@@ -340,8 +340,8 @@ try {
 |---|---|
 | REPL 入口、SYSTEM prompt | [src/index.ts](../src/index.ts) |
 | Agent Loop while 循环 | [src/agent/loop.ts](../src/agent/loop.ts) |
-| write_file / start_preview / MIME 表 | [src/tool/index.ts](../src/tool/index.ts) |
-| 读写锁（串行放行）| [src/tool-registry.ts](../src/tool-registry.ts) |
+| write_file / start_preview / MIME 表 | [src/tools/index.ts](../src/tools/index.ts) |
+| 读写锁（串行放行）| [src/tools/tool-registry.ts](../src/tools/tool-registry.ts) |
 | 预置脚手架 | [app/index.html](../app/index.html) |
 
 ## 收获清单

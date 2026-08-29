@@ -404,7 +404,7 @@ const userPrompt = existingSummary
 
 ### 6.1 标识符保护——已实现
 
-**问题**：对话里的 `src/tool-registry.ts` 这类路径，模型在摘要里可能"翻译"成"工具注册文件"。后续对话模型就找不到这个文件了。UUID、版本号、错误信息同理。
+**问题**：对话里的 `src/tools/tool-registry.ts` 这类路径，模型在摘要里可能"翻译"成"工具注册文件"。后续对话模型就找不到这个文件了。UUID、版本号、错误信息同理。
 
 **解法**：在压缩 Prompt 里明确要求原样保留。代码在 [`compressor.ts:110`](../src/session/compressor.ts#L110)：
 

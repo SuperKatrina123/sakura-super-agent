@@ -223,8 +223,8 @@ Mock 里 `wasAskingTodo()` 靠 `text.includes('todo') && text.includes('找')`�
 | REPL 入口、budget 声明 | [src/index.ts](../src/index.ts) |
 | Agent Loop while 循环 | [src/agent/loop.ts](../src/agent/loop.ts) |
 | Mock 层意图路由 | [src/mock-model.ts](../src/mock-model.ts) |
-| 读写锁、结果截断 | [src/tool-registry.ts](../src/tool-registry.ts) |
-| 通用工具实现 | [src/tool/index.ts](../src/tool/index.ts) |
+| 读写锁、结果截断 | [src/tools/tool-registry.ts](../src/tools/tool-registry.ts) |
+| 通用工具实现 | [src/tools/index.ts](../src/tools/index.ts) |
 | 靶场代码 | [sample-project/](../sample-project/) |
 
 ## 收获清单

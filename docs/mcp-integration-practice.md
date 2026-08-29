@@ -25,7 +25,7 @@ MCP 的存在就是把这件事**外部化**：任何工具方按 MCP 协议实�
 2. **走通协议层**——JSON-RPC + stdio 是 Agent 与外部进程通信的通用模式，MCP 只是其中一种应用
 3. **验证 ToolRegistry 的解耦是否成立**——如果加一个新的工具来源需要改 Agent Loop，抽象就失败了；如果一行都不改就工作，抽象就成立
 
-结论先说：Agent Loop 一行没改，`toAISDKFormat()` 一行没改，只在 [`src/tool-registry.ts`](../src/tool-registry.ts) 加了 `registerMCPServer` 和 `closeAllMCP` 两个方法，MCP 工具就跟内置工具站在了同一起跑线。
+结论先说：Agent Loop 一行没改，`toAISDKFormat()` 一行没改，只在 [`src/tools/tool-registry.ts`](../src/tools/tool-registry.ts) 加了 `registerMCPServer` 和 `closeAllMCP` 两个方法，MCP 工具就跟内置工具站在了同一起跑线。
 
 ## 1. 协议底座：JSON-RPC 2.0 over stdio
 
@@ -156,7 +156,7 @@ MCP spec 里有个 `shutdown` notification，可以优雅通知 server 收摊。
 
 ## 3. 挂进 ToolRegistry：前缀避冲突、闭包做翻译
 
-MCP 工具进 registry 走 [`ToolRegistry.registerMCPServer`](../src/tool-registry.ts)（[第 46 行](../src/tool-registry.ts#L46)）。核心是三件事。
+MCP 工具进 registry 走 [`ToolRegistry.registerMCPServer`](../src/tools/tool-registry.ts)（[第 46 行](../src/tools/tool-registry.ts#L46)）。核心是三件事。
 
 ### 3.1 前缀避冲突：`mcp__<serverName>__<toolName>`
 
@@ -328,7 +328,7 @@ MCP_CLIENT_KIND=handwritten npm start  # 教学版，看协议细节
 
 ### 6.1 为什么替换只需要动一个文件
 
-`ToolRegistry.registerMCPServer` 只依赖 `MCPClientLike` 这个**结构接口**（[`tool-registry.ts:15-24`](../src/tool-registry.ts#L15-L24)）：
+`ToolRegistry.registerMCPServer` 只依赖 `MCPClientLike` 这个**结构接口**（[`tool-registry.ts:15-24`](../src/tools/tool-registry.ts#L15-L24)）：
 
 ```ts
 export interface MCPClientLike {

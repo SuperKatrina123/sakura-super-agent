@@ -24,18 +24,18 @@ Agent 的一步里，模型可能同时发起多个工具调用（比如"查北�
 - **有副作用的必须串行** —— 独占锁同一时刻只有一个持有者
 - **独占锁必须等所有共享锁释放才能拿到**
 
-这把锁在 [`src/tool-registry.ts`](../src/tool-registry.ts)，三个状态变量、六个方法，没有依赖任何第三方库。
+这把锁在 [`src/tools/tool-registry.ts`](../src/tools/tool-registry.ts)，三个状态变量、六个方法，没有依赖任何第三方库。
 
 ## 1. 声明：isConcurrencySafe 与 isReadOnly
 
-每个工具在 [`src/tool/index.ts`](../src/tool/index.ts) 里用两个布尔字段声明自己的并发属性：
+每个工具在 [`src/tools/index.ts`](../src/tools/index.ts) 里用两个布尔字段声明自己的并发属性：
 
 | 字段 | 含义 | 示例 |
 |---|---|---|
 | `isConcurrencySafe` | 能否与其他工具安全并行 | `weatherTool: true`、`writeFileTool: false` |
 | `isReadOnly` | 是否只读、无副作用 | `weatherTool: true`、`writeFileTool: false` |
 
-代码里实际生效的只有 `isConcurrencySafe`（[`tool-registry.ts`](../src/tool-registry.ts) 第 74 行 `tool.isConcurrencySafe === true`），`isReadOnly` 目前只是文档化标签——打印在启动日志里，不参与锁的判定。真正决定拿哪把锁的是前者。
+代码里实际生效的只有 `isConcurrencySafe`（[`tool-registry.ts`](../src/tools/tool-registry.ts) 第 74 行 `tool.isConcurrencySafe === true`），`isReadOnly` 目前只是文档化标签——打印在启动日志里，不参与锁的判定。真正决定拿哪把锁的是前者。
 
 当前五个工具的分工：
 
@@ -51,7 +51,7 @@ Agent 的一步里，模型可能同时发起多个工具调用（比如"查北�
 
 ## 2. 核心机制：一把手写的读写锁
 
-锁就是 [`tool-registry.ts`](../src/tool-registry.ts) 里的三个状态变量（第 18-21 行）：
+锁就是 [`tool-registry.ts`](../src/tools/tool-registry.ts) 里的三个状态变量（第 18-21 行）：
 
 ```ts
 private exclusiveLock = false;          // 当前是否有独占锁持有者
@@ -122,7 +122,7 @@ private drainQueue(): void {
 
 ## 4. 与 execute 的接线：try/finally 兜底
 
-锁不会自己跑，它在 [`toAISDKFormat`](../src/tool-registry.ts) 里被包进每个工具的 `execute`（第 79-99 行）：
+锁不会自己跑，它在 [`toAISDKFormat`](../src/tools/tool-registry.ts) 里被包进每个工具的 `execute`（第 79-99 行）：
 
 ```ts
 execute: async (input: any) => {

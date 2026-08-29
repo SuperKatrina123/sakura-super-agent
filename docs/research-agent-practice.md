@@ -17,7 +17,7 @@
 
 ### Step 0：零代码改动前置
 
-`fetch_url` 工具早已注册（[src/tool/index.ts](../src/tool/index.ts)）：
+`fetch_url` 工具早已注册（[src/tools/index.ts](../src/tools/index.ts)）：
 
 ```ts
 export const fetchUrlTool: ToolDefinition = {
@@ -140,7 +140,7 @@ Step 4:
 
 ### ⚠️ 1. `fetch_url` 有 MOCK_PAGES 拦截，容易误判
 
-[src/tool/index.ts:319-327](../src/tool/index.ts#L319) 里的 `MOCK_PAGES` 字典会**优先命中预设内容**（`url.startsWith(key)`）。这带来两个坑：
+[src/tools/index.ts:319-327](../src/tools/index.ts#L319) 里的 `MOCK_PAGES` 字典会**优先命中预设内容**（`url.startsWith(key)`）。这带来两个坑：
 
 - **误以为"抓到了真实内容"**：模型不知道自己拿到的是 mock，可能基于 mock 做出错误规划（比如反复重试希望拿到"完整版本"）
 - **URL 前缀匹配可能覆盖广**：`https://esm.sh` 会匹配所有以此为前缀的路径（如 `https://esm.sh/react`），需要注意副作用
@@ -174,7 +174,7 @@ Step 2 场景（对比两个 URL）：10818 / 600000 (2%) —— 少得多，因
 
 ### ⚠️ 5. 模型的"重试"可能是无效重试
 
-Step 2 场景 Step 2 里模型做的"重试相同 URL"是**错误规划**——重复调用不会有新结果。但循环检测 [src/loop-detection.ts](../src/loop-detection.ts) 里 `generic_repeat` 的阈值是 5 次警告 / 8 次熔断，**第 2 次不会拦下**。
+Step 2 场景 Step 2 里模型做的"重试相同 URL"是**错误规划**——重复调用不会有新结果。但循环检测 [src/agent/loop-detection.ts](../src/agent/loop-detection.ts) 里 `generic_repeat` 的阈值是 5 次警告 / 8 次熔断，**第 2 次不会拦下**。
 
 这是循环检测阈值设计的 trade-off：
 - 阈值太低 → 误伤合理的重试尝试
@@ -218,8 +218,8 @@ Step 2 场景 Step 2 里模型做的"重试相同 URL"是**错误规划**——�
 |---|---|
 | REPL 入口、budget 声明 | [src/index.ts](../src/index.ts) |
 | Agent Loop while 循环 | [src/agent/loop.ts](../src/agent/loop.ts) |
-| fetch_url 工具实现 | [src/tool/index.ts](../src/tool/index.ts)（`fetchUrlTool` 和 `MOCK_PAGES`） |
-| 读写锁、结果截断 | [src/tool-registry.ts](../src/tool-registry.ts) |
+| fetch_url 工具实现 | [src/tools/index.ts](../src/tools/index.ts)（`fetchUrlTool` 和 `MOCK_PAGES`） |
+| 读写锁、结果截断 | [src/tools/tool-registry.ts](../src/tools/tool-registry.ts) |
 
 ## 收获清单
 

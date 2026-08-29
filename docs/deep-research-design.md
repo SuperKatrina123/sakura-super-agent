@@ -166,11 +166,11 @@ web_search(query, mode: 'quick' | 'deep')
 ```
 `quick` → Serper 拿链接；`deep` → Tavily 拿正文。Agent 只关心"要多深"，不关心后端。
 
-**方案 B 是对的**——这跟 [src/tool-registry.ts](../src/tool-registry.ts) 里"读写锁"的哲学一样：**把复杂度封在工具层，Agent 只看清晰的语义**。
+**方案 B 是对的**——这跟 [src/tools/tool-registry.ts](../src/tools/tool-registry.ts) 里"读写锁"的哲学一样：**把复杂度封在工具层，Agent 只看清晰的语义**。
 
 ## 三、实测对照：Tavily 自动挡 vs Serper 手动挡
 
-在真正实施 Deep Research 之前，我们**先接了 Tavily 和 Serper 两个后端**（[src/tool/index.ts](../src/tool/index.ts) 里的 `tavilySearchTool` / `serperSearchTool`，通过 `pickSearchTool()` 根据环境变量自动切换），并且做了**三次实测**——结果比理论预期更有意思。
+在真正实施 Deep Research 之前，我们**先接了 Tavily 和 Serper 两个后端**（[src/tools/index.ts](../src/tools/index.ts) 里的 `tavilySearchTool` / `serperSearchTool`，通过 `pickSearchTool()` 根据环境变量自动切换），并且做了**三次实测**——结果比理论预期更有意思。
 
 ### 3.1 三次实测数据
 
@@ -430,7 +430,7 @@ const MAX_STEPS = 50;  // 从 30 调到 50
 
 ### 4.1 循环检测：从"防呆"到"防重复搜索"
 
-现在的循环检测 [src/loop-detection.ts](../src/loop-detection.ts) 用**工具名 + 参数**做指纹。Deep Research 里如果模型反复 `web_search("esm.sh")` 拿到相同结果，`generic_repeat` 会触发。
+现在的循环检测 [src/agent/loop-detection.ts](../src/agent/loop-detection.ts) 用**工具名 + 参数**做指纹。Deep Research 里如果模型反复 `web_search("esm.sh")` 拿到相同结果，`generic_repeat` 会触发。
 
 **新场景下的判断**：如果模型迭代到第 3 轮还在搜同一个词，说明它规划失控——该拦。
 

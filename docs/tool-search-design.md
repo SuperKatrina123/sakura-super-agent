@@ -111,7 +111,7 @@ Claude Code 有个隐性规则：**当延迟工具的 schema 总量超过上下�
 
 ### 3.1 `ToolDefinition` 加两个字段
 
-[`tool-registry.ts:3-18`](../src/tool-registry.ts#L3-L18)：
+[`tool-registry.ts:3-18`](../src/tools/tool-registry.ts#L3-L18)：
 
 ```ts
 export interface ToolDefinition {
@@ -143,7 +143,7 @@ searchHint: 'notion search pages documents 笔记 知识库'
 
 ### 3.2 MCP 工具自动 defer
 
-[`tool-registry.ts:79-90`](../src/tool-registry.ts#L79-L90)——`registerMCPServer` 里给每个 MCP 工具默认打两个标：
+[`tool-registry.ts:79-90`](../src/tools/tool-registry.ts#L79-L90)——`registerMCPServer` 里给每个 MCP 工具默认打两个标：
 
 ```ts
 this.register({
@@ -160,7 +160,7 @@ this.register({
 
 ### 3.3 `discoveredTools` 集合
 
-[`tool-registry.ts:41-45`](../src/tool-registry.ts#L41-L45)：
+[`tool-registry.ts:41-45`](../src/tools/tool-registry.ts#L41-L45)：
 
 ```ts
 private discoveredTools = new Set<string>();
@@ -170,7 +170,7 @@ private discoveredTools = new Set<string>();
 
 ### 3.4 `searchTools` / `getActiveTools` / `getDeferredToolSummary`
 
-[`tool-registry.ts:122-179`](../src/tool-registry.ts#L122-L179) 三个方法配合：
+[`tool-registry.ts:122-179`](../src/tools/tool-registry.ts#L122-L179) 三个方法配合：
 
 - **`searchTools(query)`**：精确名字匹配，支持逗号分隔一次查多个。命中即加入 `discoveredTools`。**没有模糊匹配和评分**——因为名字已经全告诉模型了，模型选好名字才调 `tool_search`，精确匹配零依赖、零误召回、可预测。
 
@@ -182,7 +182,7 @@ private discoveredTools = new Set<string>();
 
 ### 3.5 `tool_search` 元工具
 
-[`src/tool/tool-search.ts`](../src/tool/tool-search.ts)——闭包 registry 引用的工厂函数：
+[`src/tools/tool-search.ts`](../src/tools/tool-search.ts)——闭包 registry 引用的工厂函数：
 
 ```ts
 export function createToolSearchTool(registry: ToolRegistry): ToolDefinition {
