@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、以及长会话压缩的 Microcompact + Summarization 两层策略。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、以及零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断）。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -304,6 +304,51 @@ const promptBuilder = new PromptBuilder()
   [Summarize] 压缩了 12 条老对话为摘要（684 字符）  ← 超阈值才跑
 ```
 
+## 🛡️ 零 LLM 即时防线
+
+> 📖 本节只是速览。完整设计（TokenTracker 精确基准+粗估增量、TTL 两档修剪、双 Pass 截断、两条铁律、WeakMap 存 timestamp），见 [docs/instant-defenses.md](docs/instant-defenses.md)。
+
+**问题**：Microcompact 和 Summarization 之间有一大片空间没利用——**大部分上下文膨胀不需要动用 LLM**：
+- 读了个 5 万字符的文件 → 截断到 5000 就够了
+- 10 分钟前的 grep 结果 → 直接清掉
+
+**方案**：在 Summarization 之前插三层**零 LLM 的即时防线**——纯字符串操作、毫秒级完成。
+
+### 三层防线
+
+**Layer 1: TokenTracker** — 精确基准 + 粗估增量
+- 每次 API 返回时用 `usage.inputTokens` 作为**精确基准**
+- 中间新增的 message 用字符/4 粗估补上
+- 关键性质：**偏差不累积**——每次 API 校准都重置增量
+
+**Layer 2: 动态截断** — 双 Pass 大小控制
+- Pass 1: 单条 tool_result > 50% 窗口 → Head/Tail 60/40 分割
+- Pass 2: 总量 > 75% 窗口 → 从最老 tool_result 开始整体清空
+
+**Layer 3: TTL 修剪** — 两档时间衰减
+- 5 min 软修剪：保留头 1500 + 尾 1500 字符
+- 10 min 硬清除：只留 `[tool result expired: {toolName}]`
+
+### 两条铁律
+
+1. **只修剪 tool 消息**——user / assistant 永不修剪（对话结构必须完整）
+2. **错误经验保留**——含 `error / 失败 / denied / timeout` 等关键词的 tool_result 永不修剪，避免模型重复走死路
+
+### REPL 快捷命令验证
+
+```
+You: sim       ← 注入 20 条模拟历史（一半 12 min 前 / 一半 7 min 前）
+You: status    ← [Status] 20 条消息, ~12000 tokens
+You: defend    ← 手动触发三层防线
+
+--- 执行三层防线 ---
+  [Layer 2] 截断: 0 条, 预算清理: 0 条
+  [Layer 3] 软修剪: 5, 硬清除: 5
+  [结果] ~12000 → ~4500 tokens (节省 7500)
+```
+
+**四层协同顺序**（在 agentLoop 每轮开头）：TTL → 截断 → Microcompact → Summarization。**便宜的先跑、贵的最后兜底**——每一层都可能让下一层"没事做"。
+
 ## 快速开始
 
 ```bash
@@ -348,7 +393,9 @@ src/
 ├── session/
 │   ├── store.ts             # JSONL append-only 存储 + load / stats
 │   ├── tool-result-output.ts # AI SDK 5 判别联合的工具结果编解码
-│   └── compressor.ts        # 两层压缩：microcompact + summarize
+│   ├── token-count.ts       # 计数基础工具（compressor 和 defense 共用）
+│   ├── compressor.ts        # 两层压缩：microcompact + summarize
+│   └── defense.ts           # 零 LLM 三层防线：TokenTracker + truncate + TTL
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     └── segments.ts          # 4 个默认 segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -360,7 +407,8 @@ docs/
 ├── tool-search-design.md        # ToolSearch 延迟加载（含 Prompt Cache 权衡）
 ├── session-persistence.md       # Session 持久化（JSONL、崩溃安全、恢复语义）
 ├── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
-└── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
+├── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
+└── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
 ```
 
 ## 核心设计
@@ -375,3 +423,5 @@ docs/
 - **状态持久化用 append-only**：`SessionStore` 用 JSONL append，崩溃时最多丢正在写的那一行——比"覆写整个文件"的一致性窗口小几个数量级
 - **SYSTEM 是 pipeline，不是字符串**：`PromptBuilder` 把 SYSTEM 拆成 segment，每个 segment 是纯函数、独立决定要不要出现——加新功能是加 `.pipe()`，不是拼字符串
 - **上下文压缩分层，先便宜后贵**：Microcompact（零 LLM、无损结构）永远先于 Summarization（一次 LLM 调用、结构塌陷）——能不丢结构就不丢。压缩逻辑挂在 `agentLoop` 里，caller 无感、幂等可反复触发
+- **Token 感知用"精确基准 + 粗估增量"**：`TokenTracker` 用 API 返回的 `usage.inputTokens` 作为精确基准、中间粗估补上——**偏差不累积**，每轮 API 校准都重置增量。既不用 tokenizer 依赖、又能保证长会话下估算准确
+- **修剪的两条铁律**：**只修剪 tool 消息**（user/assistant 永不修剪，对话结构必须完整）+ **错误经验保留**（含 error/失败/denied 等关键词的 tool_result 永不修剪，避免模型重复走死路）

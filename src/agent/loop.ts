@@ -1,5 +1,6 @@
 import { streamText, type ModelMessage } from 'ai';
 import { microcompact, summarize, estimateTokens } from '../session/compressor.js';
+import { applyDefense, TokenTracker, markMessageTime, markMessagesTime } from '../session/defense.js';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection.ts';
 import { isRetryable, calculateDelay, sleep } from './retry.ts';
 import { ToolRegistry } from '../tools/tool-registry.ts';
@@ -18,14 +19,34 @@ export async function agentLoop(
   registry: ToolRegistry,
   messages: ModelMessage[],
   system: string,
-  budget: BudgetState
+  budget: BudgetState,
+  tracker?: TokenTracker,   // 可选——不传的话 loop 内部 new 一个（每轮独立）
 ) {
   let step = 0;
   resetHistory();
+  const tokenTracker = tracker ?? new TokenTracker();
 
   while (step < MAX_STEPS) {
     step++;
     console.log(`\n--- Step ${step} ---`);
+
+    // ─── 零 LLM 防线：TTL 修剪 + 大小截断（applyDefense 聚合入口）─────────
+    // 顺序：便宜的先——TTL/截断（无 LLM）→ microcompact（无 LLM）→ summarize（有 LLM）
+    const defense = applyDefense(messages);
+    const defenseChanged =
+      defense.softPruned || defense.hardPruned || defense.truncated || defense.compacted;
+    if (defenseChanged) {
+      const before = messages.slice();
+      messages.splice(0, messages.length, ...defense.messages);
+      tokenTracker.replaceMessages(before, messages);
+      console.log(
+        `  [Layer 2 截断] ${defense.truncated} 条超长截断 / ${defense.compacted} 条预算清理`,
+      );
+      console.log(
+        `  [Layer 3 TTL] 软修剪 ${defense.softPruned} / 硬清除 ${defense.hardPruned}`,
+      );
+    }
+    // ────────────────────────────────────────────────────────────────────
 
     // ─── 上下文压缩：Microcompact → Summarize，前后各打 tokens 让效果可见 ─────
     // 只在本轮真的发生了压缩时才打 log，避免每轮都刷屏
@@ -33,12 +54,14 @@ export async function agentLoop(
     const beforeCount = messages.length;
     const beforeTokens = estimateTokens(messages);
 
-    // Layer 1：Microcompact（零成本、幂等——反复跑不会误清）
+    // Layer 4：Microcompact（零成本、幂等——反复跑不会误清）
     // 原地修改 messages 保持外部引用一致（index.ts / SessionStore 都指向同一个数组）
     const { messages: compacted, cleared } = microcompact(messages);
     let didAnything = false;
     if (cleared > 0) {
+      const before = messages.slice();
       messages.splice(0, messages.length, ...compacted);
+      tokenTracker.replaceMessages(before, messages);
       didAnything = true;
     }
     const afterMicroTokens = estimateTokens(messages);
@@ -46,7 +69,11 @@ export async function agentLoop(
     // Layer 2：Summarize（只在超阈值时才调 LLM，未超时 compressedCount=0）
     const summarizeResult = await summarize(model, messages);
     if (summarizeResult.compressedCount > 0) {
+      const before = messages.slice();
       messages.splice(0, messages.length, ...summarizeResult.messages);
+      tokenTracker.replaceMessages(before, messages);
+      // 摘要消息是新 push 进来的 user message——打时间戳（避免下次 TTL 因无时间戳跳过）
+      if (messages[0]) markMessageTime(messages[0]);
       didAnything = true;
     }
     const afterSummarizeTokens = estimateTokens(messages);
@@ -137,13 +164,18 @@ export async function agentLoop(
     }
 
     messages.push(...stepResponse!.messages);
+    // 打时间戳（TTL 修剪需要）+ 更新 TokenTracker 的粗估增量
+    markMessagesTime(stepResponse!.messages);
+    tokenTracker.addMessages(stepResponse!.messages);
 
     // Token 预算追踪：budget 由调用方持有，跨轮持续累计
     const inp = typeof stepUsage?.inputTokens === 'number' ? stepUsage.inputTokens : (stepUsage?.inputTokens?.total ?? 0);
     const out = typeof stepUsage?.outputTokens === 'number' ? stepUsage.outputTokens : (stepUsage?.outputTokens?.total ?? 0);
     budget.used += inp + out;
+    // 用 API 返回的精确 inputTokens 校准 TokenTracker——重置粗估增量
+    if (inp > 0) tokenTracker.updateFromAPI(inp);
     const pct = Math.round(budget.used / budget.limit * 100);
-    console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%)`);
+    console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%) · tracker ~${tokenTracker.estimatedTokens}`);
     if (budget.used > budget.limit) {
       console.log('\n[Token 预算耗尽，强制停止]');
       break;

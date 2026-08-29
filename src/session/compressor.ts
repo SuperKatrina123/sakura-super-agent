@@ -1,6 +1,7 @@
 import type { ModelMessage, ToolModelMessage, LanguageModel } from 'ai';
 import { generateText } from 'ai';
 import { textToolResultOutput, toolResultOutputToText } from './tool-result-output.js';
+import { countMessagesChars } from './token-count.js';
 
 // 保留最近 K 个 tool result 完整——因为最近几轮的结果很可能还在被模型引用
 // 你刚读的文件、刚跑的命令，模型下一步可能还要用
@@ -145,25 +146,32 @@ export interface CompactionResult {
   compressedCount: number;
 }
 
-// 粗略 token 估算：字符数 / 4（GPT tokenizer 常见近似）
-// 只算 role + content 的字符长度，metadata（id/timestamp）忽略不计
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 1：Token 估算——知道自己还剩多少空间
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 精确 token 计数要等 API 返回 usage.prompt_tokens——但那是"调完之后"才知道
+// 我们要在**调 API 之前**决定"要不要压缩"，所以必须有一个"事前估算"
+//
+// 启发式：4 字符 ≈ 1 token（英文的 GPT tokenizer 经验）
+// 但中文 token 效率低——1 个汉字 ≈ 1.5-2 tokens
+// 如果整篇是中文、按 4 字符/token 估算 → 严重低估 → 触发太晚 → 撞 API 硬墙
+//
+// 解法：加 1.2 倍安全系数——宁可高估、不能低估
+// 高估的代价：提前触发压缩（多花一次 LLM）
+// 低估的代价：API 400 拒绝，整个 loop 崩掉
+// 两害相权取其轻——**低估的代价大得多**
+
+// 安全系数：应对中文/JSON 结构字符/特殊 token 等 tokenizer 偏差
+// 中文场景大约 1.3-1.5，混合场景 1.2 够用
+const TOKEN_SAFETY_MULTIPLIER = 1.2;
+
+// 粗略 token 估算：字符数 / 4 × 安全系数
+// 计数逻辑复用 token-count.ts 里的 countMessagesChars——避免跟 defense.ts 的 TokenTracker 逻辑重复
 // export：让 agentLoop 打压缩前后的 tokens 对比 log
 export function estimateTokens(messages: ModelMessage[]): number {
-  let chars = 0;
-  for (const msg of messages) {
-    if (typeof msg.content === 'string') {
-      chars += msg.content.length;
-    } else if (Array.isArray(msg.content)) {
-      for (const part of msg.content) {
-        // tool-result / text / tool-call 都可能带文本内容
-        if ('text' in part && typeof part.text === 'string') chars += part.text.length;
-        if ('value' in part && typeof part.value === 'string') chars += part.value.length;
-        if ('output' in part) chars += toolResultOutputToText(part.output).length;
-        if ('input' in part && part.input) chars += JSON.stringify(part.input).length;
-      }
-    }
-  }
-  return Math.ceil(chars / 4);
+  const chars = countMessagesChars(messages);
+  return Math.ceil((chars / 4) * TOKEN_SAFETY_MULTIPLIER);
 }
 
 // 从 messages 里提取上一次的摘要（如果 messages[0] 是摘要消息）
