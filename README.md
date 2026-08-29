@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、以及应对工具膨胀的 ToolSearch 延迟加载。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、以及模块化 SYSTEM 的 Prompt Pipe。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -197,6 +197,73 @@ registry.searchTools() 精确名字匹配 → 加入 discoveredTools
 
 动态改 `tools` 参数会让 Prompt Cache 前几轮失效——但工具发现集中在对话前几轮，属于**一次性折损**而非持续损失。Claude Code 用 Anthropic 的 `defer_loading` beta 完全避开 cache 问题，但那是 Anthropic 独有，模型无关的项目用不了。生产推荐我们这个做法：**用原生 tools 列表做延迟加载，稳定性更有保障**。
 
+## 💾 Session 持久化
+
+> 📖 本节只是速览。完整设计（JSONL 选型、崩溃安全语义、恢复 vs 重放、`--continue` npm 参数踩坑），见 [docs/session-persistence.md](docs/session-persistence.md)。
+
+**问题**：REPL 里 `messages` 数组是**进程内内存**——Ctrl+C 一按全没了，下次启动是白纸一张。
+
+**方案**：JSONL append-only 存储 + `--continue` 显式恢复。
+
+三个选型理由：
+
+- **Append-only 天然崩溃安全**——`O_APPEND` 原子写入，最多丢正在写的那一行，历史完好
+- **可 grep / cat / jq**——所有你已经熟悉的 Unix 工具直接用，SQLite 得学它的 CLI
+- **零依赖**——只用 `node:fs`，Node 内置
+
+用法：
+
+```bash
+npm start                          # 新会话
+npm run start -- --continue        # 恢复上次的会话（注意 -- 必须加，否则 npm 吃掉 flag）
+```
+
+启动时会打印 session debug——文件路径、大小、消息分布、时间跨度，避免"文件建哪了""历史多大了"这类问题。
+
+**关键设计**：恢复不等于重放。工具已经跑过了、副作用已经落地——不能再执行一次。`store.load()` 只把 messages 塞回数组，模型看到完整历史、**继续对话**。
+
+## 🧩 Prompt Pipe
+
+> 📖 本节只是速览。完整设计（PipeFn / PromptContext / 顺序即 cache 策略 / 4 个默认 segment 的取舍），见 [docs/prompt-pipe-design.md](docs/prompt-pipe-design.md)。
+
+**问题**：SYSTEM 字符串会随着功能增加变成屎山：
+
+```ts
+const SYSTEM = `你是 Super Agent。
+${isVibeCoding ? vibeCodingRules : ''}
+${hasMemory ? memoryText : ''}
+${discoveredTools.size > 0 ? deferredSummary : ''}
+${gitBranch ? `分支: ${gitBranch}` : ''}
+...`;   // ← 几个月后 AI 都改不动
+```
+
+**方案**：把 SYSTEM 拆成独立 segment，每个是一个纯函数——`(ctx) => string | null`。
+
+```ts
+const promptBuilder = new PromptBuilder()
+  .pipe('coreRules', coreRules())            // 永远不变——cache 稳稳命中
+  .pipe('toolGuide', toolGuide())            // 工具数量基本固定
+  .pipe('deferredTools', deferredTools())    // 所有工具列表基本固定，放中间
+  .pipe('sessionContext', sessionContext()); // 每次启动都不同，放最后
+```
+
+**核心洞见**：**顺序即 cache 策略**——变化频率低的靠前、高的靠后。让 prompt cache 前缀匹配到"第一个变化的字节"才停，最大化命中率。
+
+启动时打印 pipe debug：
+
+```
+=== Prompt Pipe Debug ===
+  [ON]  coreRules: 87 chars
+  [ON]  toolGuide: 24 chars
+  [ON]  deferredTools: 3840 chars
+  [OFF] sessionContext                   ← 新会话时不占位置
+  ────────────────────────
+  Total: 3951 chars
+========================
+```
+
+`[OFF]` 显式列出——**Pipe 模式的按需出现**变得可见。加新 segment 就是加一行 `.pipe()`，条件逻辑内嵌在 segment 里、零字符串屎山。
+
 ## 快速开始
 
 ```bash
@@ -223,27 +290,34 @@ npm start        # 直接运行
 
 ```
 src/
-├── index.ts                 # 入口：readline REPL，持有 messages 与 budget，挂 MCP + 元工具
+├── index.ts                 # 入口：readline REPL，持有 messages 与 budget，挂 MCP + 元工具 + Pipe
 ├── agent/
 │   └── loop.ts              # Agent Loop：while 循环 + 步骤级重试 + 防护接入
 ├── loop-detection.ts        # 循环检测：指纹 + 滑动窗口 + 三个检测器
 ├── retry.ts                 # API 容错：错误分类 + 指数退避 + 抖动
-├── mock-model.ts            # Mock 模型：模拟工具调用 / 死循环 / 429 / 超预算 / 并发 / 编辑
-├── tool-registry.ts         # 工具注册表：读写锁 + 结果截断 + MCP 挂载 + 延迟加载状态
-├── tool/
+├── mock-model.ts            # Mock 模型:模拟工具调用 / 死循环 / 429 / 超预算 / 并发 / 编辑
+├── tools/
+│   ├── tool-registry.ts     # 工具注册表：读写锁 + 结果截断 + MCP 挂载 + 延迟加载状态
 │   ├── index.ts             # 12 个内置工具（天气/计算/文件/bash/grep/glob/搜索/抓网页/预览）
 │   ├── tool-search.ts       # 元工具 tool_search：按名字激活延迟工具
 │   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
-└── mcp/
-    ├── client.ts            # 手写 stdio MCP client（教学载体）
-    ├── sdk-client.ts        # 官方 SDK 版本（生产推荐）
-    └── mock-client.ts       # Mock 降级实现
+├── mcp/
+│   ├── client.ts            # 手写 stdio MCP client（教学载体）
+│   ├── sdk-client.ts        # 官方 SDK 版本（生产推荐）
+│   └── mock-client.ts       # Mock 降级实现
+├── session/
+│   └── store.ts             # JSONL append-only 存储 + load / stats
+└── context/
+    ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
+    └── segments.ts          # 4 个默认 segment（coreRules / toolGuide / deferredTools / sessionContext）
 
 docs/
 ├── agent-loop-protections.md    # 三道防护的完整实现细节
 ├── tool-call-concurrency.md     # 工具调用并发控制详解
 ├── mcp-integration-practice.md  # MCP 集成实践（stdio / SDK / 三层降级）
-└── tool-search-design.md        # ToolSearch 延迟加载（含 Prompt Cache 权衡）
+├── tool-search-design.md        # ToolSearch 延迟加载（含 Prompt Cache 权衡）
+├── session-persistence.md       # Session 持久化（JSONL、崩溃安全、恢复语义）
+└── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
 ```
 
 ## 核心设计
@@ -255,3 +329,5 @@ docs/
 - **工具层并发控制**：读写锁由 `ToolRegistry` 持有，`agentLoop` 对锁毫无感知——循环管"要不要调"（三道防线），工具层管"怎么安全地调"（读写锁）
 - **工具来源解耦**：`MCPClientLike` 结构接口把 MCP client 的实现（手写 / SDK / Mock）藏在 `ToolRegistry` 后面——`agentLoop.ts` 从头到尾看不到 "MCP" 这个词，加一种新来源不用改循环
 - **工具可见性动态化**：`shouldDefer` + `discoveredTools` 让工具集从"静态注册"变成"按需暴露"——registry 决定当下哪些工具进 prompt，`agentLoop` 只消费 `toAISDKFormat()` 的输出，同样毫无感知
+- **状态持久化用 append-only**：`SessionStore` 用 JSONL append，崩溃时最多丢正在写的那一行——比"覆写整个文件"的一致性窗口小几个数量级
+- **SYSTEM 是 pipeline，不是字符串**：`PromptBuilder` 把 SYSTEM 拆成 segment，每个 segment 是纯函数、独立决定要不要出现——加新功能是加 `.pipe()`，不是拼字符串

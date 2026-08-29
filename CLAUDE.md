@@ -81,6 +81,8 @@ try {
 - [docs/vibe-coding-practice.md](docs/vibe-coding-practice.md) — Vibe Coding 实践
 - [docs/mcp-integration-practice.md](docs/mcp-integration-practice.md) — MCP 集成实践（stdio 传输、ToolRegistry 融合、三层降级）
 - [docs/tool-search-design.md](docs/tool-search-design.md) — ToolSearch 延迟加载（Profile vs Lazy、Prompt Cache 权衡）
+- [docs/session-persistence.md](docs/session-persistence.md) — Session 持久化（JSONL、崩溃安全、恢复语义）
+- [docs/prompt-pipe-design.md](docs/prompt-pipe-design.md) — Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线
 - [docs/tool-call-concurrency.md](docs/tool-call-concurrency.md) — 工具读写锁

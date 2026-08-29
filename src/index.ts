@@ -14,6 +14,8 @@ import { MCPClient } from './mcp/client.ts';
 import { SDKMCPClient } from './mcp/sdk-client.ts';
 import { MockMCPClient } from './mcp/mock-client.ts';
 import { SessionStore } from './session/store.ts';
+import { PromptBuilder } from './context/prompt-builder.ts';
+import { coreRules, toolGuide, sessionContext, deferredTools } from './context/segments.ts';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -105,6 +107,15 @@ async function main() {
   console.log(`  Token 估算: ~${estimate.active} (活跃) + ~${estimate.deferred} (延迟，不占 prompt)`);
   console.log(`  节省比例: ~${Math.round(estimate.deferred / estimate.total * 100)}%`);
 
+  // Prompt Pipe 启动时打一次——用当前状态（工具都注册完 + session 恢复完）预览 SYSTEM 长啥样
+  // 每轮的实时 debug 目前不打，需要时可以在 ask() 里加 promptBuilder.debug(ctx)
+  promptBuilder.debug({
+    toolCount: registry.getAll().length,
+    deferredTools: registry.getDeferredTools(),
+    sessionMessageCount: messages.length,
+    sessionId: 'default',
+  });
+
   // 应用退出前关掉所有 MCP 子进程，避免留下孤儿。SIGINT 也走同一条路径
   const shutdown = async () => {
     await registry.closeAllMCP();
@@ -155,11 +166,13 @@ function printSessionDebug() {
   console.log(`  时间跨度: ${timespan}`);
   console.log(`======================`);
 }
-// SYSTEM 保持最小——只讲身份 + tool_search 存在
-// defer 目录在 ask() 里每轮动态拼上，因为 discoveredTools 会变
-const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
-你有内置工具和 MCP 工具可用。
-如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。`;
+// Prompt Pipe：把 SYSTEM 拆成 4 个独立 segment，每个自己决定要不要出现
+// 顺序即 cache 策略——越少变的越靠前，最大化 prompt cache 前缀命中
+const promptBuilder = new PromptBuilder()
+  .pipe('coreRules', coreRules())            // 永远不变——cache 稳稳命中
+  .pipe('toolGuide', toolGuide())            // 工具数量基本固定，变化很少
+  .pipe('deferredTools', deferredTools())    // 所有工具列表基本固定，放中间
+  .pipe('sessionContext', sessionContext()); // 每次启动都不同（历史消息数），放最后
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
 const budget: BudgetState = { used: 0, limit: 600000 };
 
@@ -177,9 +190,15 @@ function ask() {
         const beforeCount = messages.length;
         messages.push({ role: 'user', content: trimmed });
 
-        // 每轮都重新拼 SYSTEM——因为 discoveredTools 可能变，defer 目录要跟着更新
-        // （已发现的工具会从目录里消失，避免模型重复搜索）
-        const dynamicSystem = SYSTEM + registry.getDeferredToolSummary();
+        // 每轮都重建 PromptContext——registry/messages 都可能变
+        // pipe.build 里 4 个 segment 各自决定要不要出现，最终拼成 SYSTEM
+        const promptCtx = {
+            toolCount: registry.getAll().length,
+            deferredTools: registry.getDeferredTools(),
+            sessionMessageCount: messages.length - 1,   // 减去刚 push 的这条 user，反映"历史"
+            sessionId: 'default',
+        };
+        const dynamicSystem = promptBuilder.build(promptCtx);
         await agentLoop(model, registry, messages, dynamicSystem, budget);
 
         // 本轮所有新消息（user + assistant 若干 + tool 结果若干）落盘

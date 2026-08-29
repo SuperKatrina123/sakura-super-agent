@@ -150,6 +150,16 @@ export class ToolRegistry {
         });
     }
 
+    // 返回当前未发现的 defer 工具列表（原始数据，不做格式化）
+    // 让调用方（PromptBuilder segment）自己决定怎么呈现——registry 只提供数据
+    getDeferredTools(): Array<{ name: string; hint?: string }> {
+        return this.getAll()
+            .filter(t => t.shouldDefer && !this.discoveredTools.has(t.name))
+            .map(t => ({ name: t.name, hint: t.searchHint }));
+    }
+
+    // @deprecated 用 getDeferredTools() + PromptBuilder segment 代替
+    // 保留是因为 index.ts 里的动态 SYSTEM 拼接过渡期还在用；接完 pipe 后可以删
     // 生成挂到 system prompt 尾巴的"隐藏工具目录"
     // 这是 ToolSearch 模式能工作的关键：模型必须"知道有哪些能力可用"，否则永远不会想到去搜
     // 只放 name + hint，不放完整 schema——这个列表本身也要省 token
