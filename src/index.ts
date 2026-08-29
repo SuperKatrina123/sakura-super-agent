@@ -5,14 +5,15 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { createMockModel } from './mock-model'
 import { createInterface } from 'node:readline';
 import process from 'node:process';
-import { ToolRegistry } from './tool-registry.ts';
-import { allTools, pickSearchTool } from './tool/index.ts';
-import { simulatedMcpTools } from './tool/simulated-mcp.ts';
-import { createToolSearchTool } from './tool/tool-search.ts';
+import { ToolRegistry } from './tools/tool-registry.ts';
+import { allTools, pickSearchTool } from './tools/index.ts';
+import { simulatedMcpTools } from './tools/simulated-mcp.ts';
+import { createToolSearchTool } from './tools/tool-search.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
 import { MCPClient } from './mcp/client.ts';
 import { SDKMCPClient } from './mcp/sdk-client.ts';
 import { MockMCPClient } from './mcp/mock-client.ts';
+import { SessionStore } from './session/store.ts';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -121,31 +122,44 @@ main().catch((err) => {
   process.exit(1);
 });
 
-const messages: ModelMessage[] = [];
-const SYSTEM = `你是一个Agent，一个专注于软件开发的AI助手。你说话简单直接，喜欢用代码示例来解释问题。如果用户说话模糊，你倾向于询问而不是瞎猜。
+// Session 持久化：默认新会话，加 --continue 恢复
+// budget 和 discoveredTools 目前不持久化——重启后从零开始（已知限制）
+const isContinue = process.argv.includes('--continue');
+const store = new SessionStore('default');
 
-## Vibe Coding 模式（当用户要求"做一个 XX 网页/应用/小程序"时启用）
+let messages: ModelMessage[] = [];
+if (isContinue && store.exists()) {
+  messages = store.load();
+  console.log(`[Session] 恢复会话，${messages.length} 条历史消息`);
+} else {
+  console.log(`[Session] 新会话`);
+}
 
-项目里有一个预置的 app/ 目录，专门用来跑用户想要的小应用。你的职责是**只写应用代码**：
+// Session 调试信息——启动时打印一次，方便排查文件路径 / 历史膨胀 / 消息分布
+// 空会话也打（能看到"文件会写到哪"，避免下次又"找不到 jsonl"）
+printSessionDebug();
 
-- **只允许写**：app/App.tsx（必需，作为入口）、app/其他组件.tsx、app/styles.css
-- **绝对不要动**：app/index.html——这是预置的脚手架（importmap + Babel + loader），改了会让整个应用跑不起来
-- **写完立即调 start_preview**——用户需要看到运行结果
-
-技术约束（浏览器直接跑，无 build 工具）：
-1. 不要写 \`import React from 'react'\`——用 automatic JSX runtime，直接写 JSX 即可
-2. 需要 hooks 时明确导入：\`import { useState } from 'react'\`
-3. App.tsx 必须有入口渲染代码：
-   \`\`\`tsx
-   import { createRoot } from 'react-dom/client';
-   createRoot(document.getElementById('root')!).render(<App />);
-   \`\`\`
-4. 组件间 import 可以省略后缀（loader 会尝试 .tsx/.ts/.jsx/.js），但**推荐写全**：\`import Button from './Button.tsx'\`
-5. 只能用 react / react-dom，不要引第三方库（除非在 index.html 的 importmap 里已经注册）
-6. 样式统一写在 app/styles.css，不用 CSS-in-JS
-7. 不要用 Node 环境的东西（process.env、fs、path 等——这些浏览器里没有）
-
-流程：write_file 应用代码 → start_preview → 告诉用户 http://localhost:8080`;
+function printSessionDebug() {
+  const s = store.stats();
+  const kb = (s.bytes / 1024).toFixed(1);
+  const roles = Object.entries(s.roleBreakdown)
+    .map(([r, n]) => `${r} × ${n}`)
+    .join(' / ') || '(空)';
+  const timespan = s.firstTimestamp && s.lastTimestamp
+    ? `${s.firstTimestamp} → ${s.lastTimestamp}`
+    : '(无消息)';
+  console.log(`\n=== Session Debug ===`);
+  console.log(`  文件路径: ${s.absolutePath}`);
+  console.log(`  文件大小: ${kb} KB`);
+  console.log(`  消息分布: ${roles}`);
+  console.log(`  时间跨度: ${timespan}`);
+  console.log(`======================`);
+}
+// SYSTEM 保持最小——只讲身份 + tool_search 存在
+// defer 目录在 ask() 里每轮动态拼上，因为 discoveredTools 会变
+const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
+你有内置工具和 MCP 工具可用。
+如果你需要的工具不在当前列表中，使用 tool_search 工具搜索。`;
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
 const budget: BudgetState = { used: 0, limit: 600000 };
 
@@ -158,12 +172,20 @@ function ask() {
             return;
         }
 
+        // 记住 push user 消息前的位置——本轮结束时从这里开始 flush 到磁盘
+        // 策略 2：本轮结束一次性 append 新消息。崩溃丢当前轮，退出/Ctrl+C 前正常落盘
+        const beforeCount = messages.length;
         messages.push({ role: 'user', content: trimmed });
 
         // 每轮都重新拼 SYSTEM——因为 discoveredTools 可能变，defer 目录要跟着更新
         // （已发现的工具会从目录里消失，避免模型重复搜索）
         const dynamicSystem = SYSTEM + registry.getDeferredToolSummary();
         await agentLoop(model, registry, messages, dynamicSystem, budget);
+
+        // 本轮所有新消息（user + assistant 若干 + tool 结果若干）落盘
+        for (let i = beforeCount; i < messages.length; i++) {
+            store.append(messages[i]);
+        }
 
         if (!rl.closed) ask();   // 管道输入 EOF 时 readline 已关闭，跳过避免 ERR_USE_AFTER_CLOSE
     });

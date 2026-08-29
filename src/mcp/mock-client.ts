@@ -1,4 +1,4 @@
-import type { MCPClientLike } from '../tool-registry.ts';
+import type { MCPClientLike } from '../tools/tool-registry.ts';
 
 // Mock MCP：没有 GITHUB_PERSONAL_ACCESS_TOKEN 或 spawn 失败时降级用
 // 装成一个迷你 GitHub server——返回预设数据，让 Agent Loop 能端到端跑通

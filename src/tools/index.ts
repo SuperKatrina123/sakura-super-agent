@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
-import type { ToolDefinition } from '../tool-registry.ts';
+import type { ToolDefinition } from './tool-registry.ts';
 import { execSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import TurndownService from 'turndown';

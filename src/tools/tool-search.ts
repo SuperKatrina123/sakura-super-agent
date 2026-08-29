@@ -1,4 +1,4 @@
-import type { ToolDefinition, ToolRegistry } from '../tool-registry.ts';
+import type { ToolDefinition, ToolRegistry } from './tool-registry.ts';
 
 // tool_search: 元工具——不做业务操作，只根据工具名激活延迟工具
 //

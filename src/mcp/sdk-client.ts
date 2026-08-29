@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { MCPClientLike } from '../tool-registry.ts';
+import type { MCPClientLike } from '../tools/tool-registry.ts';
 
 // 官方 SDK 版本的 MCP client——生产环境推荐用这个
 // 跟手写 client.ts 相比，SDK 帮你干了：

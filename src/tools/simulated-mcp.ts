@@ -1,4 +1,4 @@
-import type { ToolDefinition } from '../tool-registry.ts';
+import type { ToolDefinition } from './tool-registry.ts';
 
 // 模拟制造环境：额外注入 11 个 MCP 工具，把总数推到 49
 // 目的是复现"工具太多 → 模型选择准确率下降 + 上下文膨胀"的真实场景
