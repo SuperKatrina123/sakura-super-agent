@@ -1,6 +1,7 @@
 import { streamText, type ModelMessage } from 'ai';
 import { microcompact, summarize, estimateTokens } from '../session/compressor.js';
 import { applyDefense, TokenTracker, markMessageTime, markMessagesTime } from '../session/defense.js';
+import { UsageTracker, normalizeUsage } from '../session/usage-tracker.js';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection.ts';
 import { isRetryable, calculateDelay, sleep } from './retry.ts';
 import { ToolRegistry } from '../tools/tool-registry.ts';
@@ -13,6 +14,12 @@ export interface BudgetState {
   limit: number;
 }
 
+// 描述当前 loop 用的模型——用来查价目表、走 provider 特化归一化
+export interface ModelInfo {
+  provider: string;      // 'deepseek' / 'openai' / 'anthropic' / 'mock' 等
+  modelName: string;     // 用来查 PRICE_TABLE 的 key
+}
+
 
 export async function agentLoop(
   model: any,
@@ -20,11 +27,19 @@ export async function agentLoop(
   messages: ModelMessage[],
   system: string,
   budget: BudgetState,
-  tracker?: TokenTracker,   // 可选——不传的话 loop 内部 new 一个（每轮独立）
+  opts?: {
+    tracker?: TokenTracker;   // 可选——不传的话 loop 内部 new 一个（每轮独立）
+    usageTracker?: UsageTracker;  // 可选——记录每步的四类 token + cache 命中率
+    modelInfo?: ModelInfo;    // 可选——不传时 usage cost 打 0
+    cacheDisabled?: boolean;  // 可选——true 时 SYSTEM 前面加 nonce 破坏 cache（实验对照用）
+  },
 ) {
   let step = 0;
   resetHistory();
-  const tokenTracker = tracker ?? new TokenTracker();
+  const tokenTracker = opts?.tracker ?? new TokenTracker();
+  const usageTracker = opts?.usageTracker;
+  const modelInfo = opts?.modelInfo;
+  const cacheDisabled = opts?.cacheDisabled === true;
 
   while (step < MAX_STEPS) {
     step++;
@@ -100,11 +115,18 @@ export async function agentLoop(
     let lastToolCall: { name: string; input: unknown } | null = null;
     let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
     let stepUsage: Awaited<ReturnType<typeof streamText>['usage']>;
+    let stepProviderMetadata: any;
 
     // 步骤级重试：包裹整个 stream 消费过程
     for (let attempt = 1; ; attempt++) {
       try {
-        const result = streamText({ model, system, tools: registry.toAISDKFormat(), messages, maxRetries: 0, onError: () => {} });
+        // cache 禁用模式：每步给 SYSTEM 加一个 nonce 前缀——破坏 cache 前缀匹配
+        // 每步用不同的 nonce（含 step + timestamp）——确保连续调用都 miss
+        // nonce 本身很小（~40 字符 ≈ 10 tokens）、可忽略
+        const effectiveSystem = cacheDisabled
+          ? `[cache-off nonce: step=${step} t=${Date.now()}]\n${system}`
+          : system;
+        const result = streamText({ model, system: effectiveSystem, tools: registry.toAISDKFormat(), messages, maxRetries: 0, onError: () => {} });
 
         for await (const part of result.fullStream) {
           switch (part.type) {
@@ -145,6 +167,9 @@ export async function agentLoop(
 
         stepResponse = await result.response;
         stepUsage = await result.usage;
+        // providerMetadata 独立于 response——AI SDK 5 里 Anthropic 的 cache write 从这里挖
+        // 用 await 是因为 streamText 的返回是 lazy——只在流消费完后才 resolve
+        stepProviderMetadata = await (result as any).providerMetadata;
         break;
       } catch (error) {
         if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
@@ -174,6 +199,23 @@ export async function agentLoop(
     budget.used += inp + out;
     // 用 API 返回的精确 inputTokens 校准 TokenTracker——重置粗估增量
     if (inp > 0) tokenTracker.updateFromAPI(inp);
+
+    // Cache 可视化：把 stepUsage 归一化成四类 token，记录到 UsageTracker
+    // 只在 caller 传了 usageTracker + modelInfo 时才做——保持 agentLoop 的可选依赖
+    if (usageTracker && modelInfo) {
+      const normalized = normalizeUsage(stepUsage, {
+        provider: modelInfo.provider,
+        providerMetadata: stepProviderMetadata,
+      });
+      const rec = usageTracker.record(modelInfo.modelName, normalized);
+      // 命中率只算 miss + read 的比例——cacheWrite 是"投入"不算"命中"
+      const denom = rec.inputTokens + rec.cacheReadTokens;
+      const hit = denom > 0 ? Math.round(rec.cacheReadTokens / denom * 100) : 0;
+      console.log(
+        `  [Cache] hit ${hit}% · $${rec.cost.total.toFixed(4)} (baseline $${rec.cost.baseline.toFixed(4)})`,
+      );
+    }
+
     const pct = Math.round(budget.used / budget.limit * 100);
     console.log(`  [Token] ${budget.used}/${budget.limit} (${pct}%) · tracker ~${tokenTracker.estimatedTokens}`);
     if (budget.used > budget.limit) {

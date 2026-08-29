@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、以及零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断）。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断），以及成本可视化（Cache 感知 + `/context` / `/usage` 快捷命令）。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -349,6 +349,90 @@ You: defend    ← 手动触发三层防线
 
 **四层协同顺序**（在 agentLoop 每轮开头）：TTL → 截断 → Microcompact → Summarization。**便宜的先跑、贵的最后兜底**——每一层都可能让下一层"没事做"。
 
+## 💰 成本可视化
+
+> 📖 本节只是速览。完整设计（Cache 三种模式对比、各家 provider 定价矩阵、UsageTracker 的四类 token 归一化、31% 命中率背后的架构分析），见 [docs/cost-visualization.md](docs/cost-visualization.md)。
+
+**核心洞察**：**上下文小 ≠ 花钱少**。同样 20k tokens 聊 50 轮 = 1M tokens 计费——SYSTEM prompt、工具描述、历史消息**每轮都要重新付费**。
+
+**方案**：Prompt Cache——服务端缓存前缀、下次相同前缀直接复用、只花 10-25% 价格。
+
+### Prompt Cache 三种模式
+
+| 模式 | 代表 provider | 命中折扣 |
+|---|---|---|
+| **隐式** | OpenAI GPT-5、**DeepSeek V4**、GLM、MiniMax | 75-99% off |
+| **显式标记** | Claude Sonnet/Haiku/Opus、Qwen explicit | 90% off |
+| **显式创建** | Gemini 3、豆包 | 80% off + 存储费 |
+
+我们跑 **DeepSeek V4 Flash**（99% off、隐式模式、零代码改动、TTL 数小时到数天）—— **命中的 tokens 几乎不花钱**。
+
+### UsageTracker：四类 token 分开算
+
+```ts
+interface StepUsage {
+  inputTokens: number;       // 真正 cache miss（miss 价）
+  outputTokens: number;      // 生成（output 价）
+  cacheReadTokens: number;   // 命中（read 价，10-25% off）
+  cacheWriteTokens: number;  // 首次写入（Anthropic 特有，比 input 贵 25%）
+}
+```
+
+**Provider 特化**：OpenAI 的 `inputTokens` 包含 cached 部分——必须减去避免重复算钱。**"用别人的数据前必须知道它的规则"**。
+
+### 两个快捷命令
+
+**`/context`** —— 16×16 网格看**空间**分布：
+
+```
+● ● ◐ ◒ ◒ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○    deepseek/deepseek-v4-flash
+○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○    2.6k/128.0k tokens (2.0%)
+                                    ● System prompt    1.0k (0.79%)
+                                    ◐ System tools      650 (0.51%)
+                                    ◉ Messages           48 (0.04%)
+                                    ○ Free space     119.0k (92.9%)
+                                    ▢ Buffer           6.4k (5.0%)
+```
+
+**`/usage`** —— cache 效果看**成本**分布：
+
+```
+Usage Summary
+  8 步累计
+
+  ◎      Input           70.4k tokens
+  ◈ Cache write         0 tokens
+  ◉  Cache read      31.9k tokens   (31.2% hit)
+  ◇      Output           3.2k tokens
+
+  Cache hit rate  █████████░░░░░░░░░░░░░░░░░░░░░  31.2%
+
+  Cost            $0.0234
+  Without cache   $0.0311
+  Saved           $0.0077 (24.9% off)
+```
+
+### 实测洞察：31% 命中率背后
+
+**理想的 DeepSeek Agent 应该能到 70-85%**——我们实测 31% 说明架构有优化空间。四个破 cache 点：
+
+1. **`sessionContext` segment 每轮变**（`sessionMessageCount` 每 +1、SYSTEM 就变）
+2. **`deferredTools` 目录被 tool_search 命中后变短**
+3. **ToolSearch 激活工具、`tools` 参数变化**
+4. **Compaction/Summarization 修改 messages 前缀**
+
+**"架构设计和 cache 命中率是耦合的"**——每个动态点都在扣命中率的分。**优化的性价比顺序**：`sessionContext` 稳定化（3 行代码）→ defer 目录不动态过滤 → 延迟 Summarization 触发。
+
+### Cache 的回报模式：前期投入、后期省心
+
+```
+第 1 轮:  hit  0% —— cache 冷启动
+第 2 轮:  hit 34% —— 开始被读
+第 3 轮:  hit 49% —— 稳定升温
+```
+
+**单次调用不适合开显式 cache**（写入比不写还贵）、但 **Agent 动辄几十轮的多步对话是 cache 的最佳应用场景**。
+
 ## 快速开始
 
 ```bash
@@ -395,10 +479,12 @@ src/
 │   ├── tool-result-output.ts # AI SDK 5 判别联合的工具结果编解码
 │   ├── token-count.ts       # 计数基础工具（compressor 和 defense 共用）
 │   ├── compressor.ts        # 两层压缩：microcompact + summarize
-│   └── defense.ts           # 零 LLM 三层防线：TokenTracker + truncate + TTL
+│   ├── defense.ts           # 零 LLM 三层防线：TokenTracker + truncate + TTL
+│   └── usage-tracker.ts     # Cache 可视化：四类 token 归一化 + 成本 breakdown
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
-    └── segments.ts          # 4 个默认 segment（coreRules / toolGuide / deferredTools / sessionContext）
+    ├── segments.ts          # 4 个默认 segment
+    └── view.ts              # 上下文 / usage 可视化（/context / /usage 快捷命令）
 
 docs/
 ├── agent-loop-protections.md    # 三道防护的完整实现细节
@@ -408,7 +494,8 @@ docs/
 ├── session-persistence.md       # Session 持久化（JSONL、崩溃安全、恢复语义）
 ├── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
 ├── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
-└── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
+├── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
+└── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
 ```
 
 ## 核心设计
@@ -425,3 +512,5 @@ docs/
 - **上下文压缩分层，先便宜后贵**：Microcompact（零 LLM、无损结构）永远先于 Summarization（一次 LLM 调用、结构塌陷）——能不丢结构就不丢。压缩逻辑挂在 `agentLoop` 里，caller 无感、幂等可反复触发
 - **Token 感知用"精确基准 + 粗估增量"**：`TokenTracker` 用 API 返回的 `usage.inputTokens` 作为精确基准、中间粗估补上——**偏差不累积**，每轮 API 校准都重置增量。既不用 tokenizer 依赖、又能保证长会话下估算准确
 - **修剪的两条铁律**：**只修剪 tool 消息**（user/assistant 永不修剪，对话结构必须完整）+ **错误经验保留**（含 error/失败/denied 等关键词的 tool_result 永不修剪，避免模型重复走死路）
+- **成本可见比省成本更重要**：`UsageTracker` 把四类 token（miss / write / read / output）分开算、`/context` 看空间、`/usage` 看成本。**看不到就没办法优化**——`saved = baseline - actual` 那一行数字比任何优化建议更能推动改进
+- **架构设计和 cache 命中率是耦合的**：每个"每轮变化"的设计决策（`sessionContext` 递增、`deferredTools` 动态过滤、`tools` 参数被 ToolSearch 修改、Summarization 重写 messages）都在扣命中率的分。教学项目实测 31% —— 生产化时必须重新审视每个动态点

@@ -85,6 +85,7 @@ try {
 - [docs/prompt-pipe-design.md](docs/prompt-pipe-design.md) — Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
 - [docs/context-compression.md](docs/context-compression.md) — 上下文压缩（Microcompact + Summarization 两层策略）
 - [docs/instant-defenses.md](docs/instant-defenses.md) — 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
+- [docs/cost-visualization.md](docs/cost-visualization.md) — 成本可视化（Cache 三种模式 / `/context` / `/usage` / 31% 命中率的架构分析）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线
 - [docs/tool-call-concurrency.md](docs/tool-call-concurrency.md) — 工具读写锁
