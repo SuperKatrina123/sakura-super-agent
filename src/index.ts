@@ -33,6 +33,9 @@ import { PluginManager } from './plugins/manager.ts';
 import { supabasePlugin } from './plugins/supabase-plugin.ts';
 import type { PluginDefinition } from './plugins/types.ts';
 import { createPluginCommands } from './commands/plugin.ts';
+import { ChannelGateway } from './channels/gateway.ts';
+import { FeishuChannel } from './channels/feishu.ts';
+import { createChannelCommands } from './commands/channel.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -83,6 +86,34 @@ const availablePlugins = new Map<string, PluginDefinition>([
 ]);
 // 启动时默认加载哪些 plugin——教学演示：把 supabase 直接加载、Agent 一进 loop 就能用
 const defaultPlugins: PluginDefinition[] = [supabasePlugin];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Channel 系统
+// ═══════════════════════════════════════════════════════════════════════════
+// Channel 是"输入源"——飞书 / Slack / 邮件 / Web 都能作为独立的输入通道
+// Gateway 负责把 IncomingMessage 路由到 agentLoop、把 assistant 回复通过 channel.send 发回
+// 每个 (channelName, senderId) 对应一个独立 session——不同用户的对话互不污染
+//
+// **接线时序**：gateway 实例化时就要拿到 model + registry + buildSystem
+// buildSystem 是 closure——每次调用都用当前 registry 状态重新 build、保证 tool_search 激活的工具能被 channel session 看到
+const gateway = new ChannelGateway({
+  model,
+  registry,
+  buildSystem: () => promptBuilder.build({
+    toolCount: registry.getAll().length,
+    deferredTools: registry.getDeferredTools(),
+    sessionMessageCount: 0,   // channel session 内部各自管 messages、这里给 0 作为静态视角
+    sessionId: 'channel',
+  }),
+});
+
+const FEISHU_PORT = Number(process.env.FEISHU_PORT || '3000');
+const feishuChannel = new FeishuChannel({
+  appId: process.env.FEISHU_APP_ID || '',
+  appSecret: process.env.FEISHU_APP_SECRET || '',
+  port: FEISHU_PORT,
+});
+gateway.register(feishuChannel);
 
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
@@ -157,6 +188,12 @@ async function main() {
     }
   }
 
+  // Channel 注册 + 启动——放在 plugin 加载之后
+  // 启动所有 channel——feishuChannel 已在顶层 register 过
+  // 未配 FEISHU_APP_ID / SECRET 时飞书 SDK 不会启动、只起 Dashboard 状态面板
+  console.log(`\n启动 Channel...`);
+  await gateway.startAll();
+
   // RAG 索引：启动时扫 docs/、chunk、embed、灌进 SQLite 三表
   // SQLite 持久化：进程退出后知识库还在、无需重新 embed
   // 用 DASHSCOPE_API_KEY 走真实 embedding、否则降级到 mock
@@ -195,7 +232,12 @@ async function main() {
   // 应用退出前关掉所有 MCP 子进程 + 卸载所有 Plugin，避免留下孤儿资源
   // Plugin 的 destroy 用于释放 DB 连接池、WebSocket、setInterval 等长生命周期资源
   // unloadAll 内部对每个 plugin 独立 try/catch——一个 destroy 出错不影响其他
+  //
+  // **停机顺序**：channel → plugin → MCP
+  //   channel 里的 session 可能正在跑 agentLoop、里面会调 plugin/MCP 工具
+  //   channel 先停 → 不再有新请求进来 → plugin/MCP 才能安全清
   const shutdown = async () => {
+    await gateway.stopAll();
     await pluginManager.unloadAll();
     await registry.closeAllMCP();
     process.exit(0);
@@ -303,6 +345,9 @@ const dispatcher = createDispatcher([
   // /plugin / /plugin list / /plugin load <name> / /plugin unload <name>
   // handler 数组内部已按顺序排好：load / unload 先匹配、list 兜底
   ...createPluginCommands(pluginManager, availablePlugins),
+  // ── Channel 命令 ────────────────────────────────────
+  // /channel / /channel list —— 查看已注册的输入通道
+  ...createChannelCommands(gateway),
   // ── Skill 命令 ──────────────────────────────────────
   skillLoadHandler,     // "/skill load <name>" —— 必须在裸 skill 之前
   skillUnloadHandler,   // "/skill unload <name>"
@@ -316,6 +361,8 @@ function ask() {
         const trimmed = input.trim();
         if (!trimmed || trimmed === 'exit') {
             console.log('Bye!');
+            await gateway.stopAll();          // 关闭所有 Channel（长连接、HTTP 服务器）
+            await pluginManager.unloadAll();  // 释放 plugin 资源（DB 连接、订阅、定时器）
             rl.close();
             return;
         }
