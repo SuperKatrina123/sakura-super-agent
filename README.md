@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断）、成本可视化（Cache 感知 + `/context` / `/usage` 快捷命令），以及跨会话记忆（四种类型、按需注入、"记忆是线索不是事实"）。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断）、成本可视化（Cache 感知 + `/context` / `/usage` 快捷命令）、跨会话记忆（四种类型、按需注入、"记忆是线索不是事实"），以及 RAG 知识库（SQLite 三表架构、向量 + BM25 混合检索、MMR 去重）。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -497,7 +497,67 @@ memory forget <name>     删除
 
 **也支持 slash 前缀**：`/memory search xxx` 等价、跟 Claude Code 风格兼容。
 
+## 🔎 RAG 知识库
 
+> 📖 本节只是速览。完整设计（六步管线、三层漏斗、归一化 + MMR、SQLite 三表、Agentic RAG、生产 gap），见 [docs/rag-system-design.md](docs/rag-system-design.md)。
+
+**问题**：grep / read_file 是字面匹配——用户问"部署事故"、文档里写"上线出问题"、**零命中**。**需要语义检索**。
+
+**方案**：RAG 六步管线——**加载 → 分块 → 向量化 → 存储 → 检索 → 注入**。
+
+### 关键决策：递归段落分块（不是"语义分块"）
+
+实测数据：
+- **递归段落分块**（按空行→句号→硬切）：准确率 **69%**
+- **语义分块**（按 embedding 相似度切主题边界）：准确率 **54%**
+
+**为什么"更聪明"反而更差**：语义分块的**误差会累积**——一个切分点错、后面全跟着错。递归段落的边界是**结构性的**、不累积。
+
+### 混合检索：向量 + BM25、7:3 加权
+
+```
+query
+  ↓
+向量 top-20 + BM25 top-20        ← 各路径宽召回（×4 候选池给融合留余量）
+  ↓
+min-max 归一到 [0, 1] → 0.7 × vec + 0.3 × kw
+  ↓
+Union 合并、取 top-10
+  ↓
+MMR 去重（λ=0.7、Jaccard 相似度）  ← 兼顾相关性和多样性
+  ↓
+返回 topK=5
+```
+
+- **向量**处理语义相近（"部署事故" ↔ "上线出问题"）
+- **BM25**处理精确命中（专有名词、代码符号）
+- **min-max 归一化**让两种分数同尺度
+- **Union 合并**让"只一路命中"的 chunk 也能出现、分数低一些
+- **MMR** 避免 top-5 全是同一节的相邻段落
+
+### SQLite 三表架构：从内存到持久化
+
+内存数组够跑、但**进程一退出知识库就没了**。生产方案：SQLite + sqlite-vec + FTS5 三表——**同一 chunk id、三表 JOIN**：
+
+```sql
+chunks       -- 主表：id / text / source / embedding json / updated_at
+chunks_vec   -- 虚表：sqlite-vec 的向量索引（vec0 + FLOAT[128]）
+chunks_fts   -- 虚表：FTS5 全文倒排索引（内置 BM25 打分）
+```
+
+**为什么分三表**：向量最近邻不能用 B-Tree、全文搜索不能用 LIKE——**每种索引结构都需要特殊虚表**、分表不是设计选择、是索引选型强制。
+
+**持久化实测**：
+- **第一次启动**：`已有 0、新增 178` —— 全量 embed
+- **第二次启动**：`已有 178、新增 0` —— **秒开、跳过 embed**
+
+### Agentic RAG：RAG 管线是工具、Agent Loop 是决策者
+
+**传统 RAG**：搜一次 → 注入 → 生成。一次性、无法迭代。
+
+**Agentic RAG**：Agent 自己决定搜什么、搜几次、怎么组合。**这不需要改 RAG 管线**——Agent Loop 本身就支持多步工具调用、`rag_search` 只是一个工具、Agent 判断"结果不够就再调一次"。
+
+实测：Agent 主动用 `rag_search` 找到相关文档、再用 `read_file` 读全文——**RAG 是"发现工具"、read_file 是"精读工具"**、Agent 自己判断分工、无需 prompt 教。
 
 ## 快速开始
 
@@ -535,7 +595,8 @@ src/
 │   ├── tool-registry.ts     # 工具注册表：读写锁 + 结果截断 + MCP 挂载 + 延迟加载状态
 │   ├── index.ts             # 12 个内置工具（天气/计算/文件/bash/grep/glob/搜索/抓网页/预览）
 │   ├── tool-search.ts       # 元工具 tool_search：按名字激活延迟工具
-│   ├── memory-tools.ts      # 元工具 memory：跨会话记忆（save/list/search/read/delete）
+│   ├── memory-tools.ts      # 元工具 memory:跨会话记忆（save/list/search/read/delete）
+│   ├── rag-tools.ts         # 元工具 rag_search：SQLite 三表混合检索
 │   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
 ├── mcp/
 │   ├── client.ts            # 手写 stdio MCP client（教学载体）
@@ -543,6 +604,13 @@ src/
 │   └── mock-client.ts       # Mock 降级实现
 ├── memory/
 │   └── store.ts             # 索引 + 分散 markdown 文件 + LRU 淘汰 + 24h 过期提醒
+├── rag/
+│   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
+│   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
+│   ├── search.ts            # 内存版 hybridSearch（含 MMR 去重）
+│   ├── sqlite-store.ts      # SQLite 三表（chunks / chunks_vec / chunks_fts）
+│   ├── build-sqlite.ts      # 扫 docs → chunk → embed → 灌 SQLite（增量）
+│   └── index.ts             # 保留的内存 JSON 版（教学对比用）
 ├── session/
 │   ├── store.ts             # JSONL append-only 存储 + load / stats
 │   ├── tool-result-output.ts # AI SDK 5 判别联合的工具结果编解码
@@ -558,7 +626,8 @@ src/
 │   └── memory.ts            # memory / memory search / read / forget
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
-    ├── segments.ts          # 5 个默认 segment（含 memoryContext）
+    ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
+    ├── prompt-pipes.ts      # 依赖运行时组件的 pipe（memoryContext / ragContext）
     └── view.ts              # /context / /usage 的 ASCII 渲染
 
 docs/
@@ -571,7 +640,8 @@ docs/
 ├── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
 ├── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
 ├── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
-└── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
+├── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
+└── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 
 ## 核心设计
@@ -591,3 +661,4 @@ docs/
 - **成本可见比省成本更重要**：`UsageTracker` 把四类 token（miss / write / read / output）分开算、`/context` 看空间、`/usage` 看成本。**看不到就没办法优化**——`saved = baseline - actual` 那一行数字比任何优化建议更能推动改进
 - **架构设计和 cache 命中率是耦合的**：每个"每轮变化"的设计决策（`sessionContext` 递增、`deferredTools` 动态过滤、`tools` 参数被 ToolSearch 修改、Summarization 重写 messages）都在扣命中率的分。教学项目实测 31% —— 生产化时必须重新审视每个动态点
 - **记忆的排除法比包含法重要**：`memory_remember` 工具的 description 里明确列出"能从代码/git/环境变量推导的不存、时效性强的不存"——**做记忆系统最容易犯的错是什么都存**（Mem0 报告 33% 记忆 90 天内过期）。四种类型（user/feedback/project/reference）通过 enum 强制归类、无法归类的信息就不该存
+- **检索是漏斗、不是一步**：RAG 用三层缩窄（宽召回 → 融合 → MMR）——**跟压缩系统的"先便宜后贵"、防线系统的"先规则后 LLM"一脉相承**。分表也不是设计选择、是"向量最近邻需要 vec0 虚表、全文搜索需要 FTS5 虚表"的索引选型强制
