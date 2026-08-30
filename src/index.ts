@@ -16,10 +16,12 @@ import { MockMCPClient } from './mcp/mock-client.ts';
 import { SessionStore } from './session/store.ts';
 import { PromptBuilder } from './context/prompt-builder.ts';
 import { coreRules, toolGuide, sessionContext, deferredTools } from './context/segments.ts';
-import { renderContextMatrix, buildSnapshot, renderUsageSummary } from './context/view.ts';
-import { estimateTokens } from './session/compressor.ts';
-import { applyDefense, markMessageTime } from './session/defense.ts';
+import { markMessageTime } from './session/defense.ts';
 import { UsageTracker } from './session/usage-tracker.ts';
+import { createDispatcher, type CommandContext } from './commands/index.ts';
+import { statusHandler, contextHandler, usageHandler } from './commands/view.ts';
+import { simHandler, defendHandler } from './commands/defense.ts';
+import { cacheOffHandler, cacheOnHandler, cacheStatusHandler } from './commands/cache.ts';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -186,36 +188,19 @@ const usageTracker = new UsageTracker();
 
 // Cache 实验开关：'cache off' 命令切换、agentLoop 里给 SYSTEM 加 nonce 破坏 cache
 // 让"cache 有多值钱"变成可实测的对照实验
-let cacheDisabled = false;
+// Cache 实验开关——用对象包装成 ref、这样 dispatcher/handler 里改能同步到 agentLoop 读取处
+const cacheState = { disabled: false };
 const modelInfo = process.env.DEEPSEEK_API_KEY
   ? { provider: 'deepseek', modelName: 'deepseek-v4-flash' }
   : { provider: 'mock', modelName: 'mock-model' };
+// 快捷命令 dispatcher——handler 按数组顺序尝试匹配
+// 注意：cache off / cache on 必须在裸 cache 之前（前者是更长的精确匹配）
+const dispatcher = createDispatcher([
+  statusHandler, contextHandler, usageHandler,
+  simHandler, defendHandler,
+  cacheOffHandler, cacheOnHandler, cacheStatusHandler,
+]);
 
-// 生成模拟历史——一半打 12 分钟前的时间戳（触发硬清）、一半 7 分钟前（触发软修剪）
-// 用来演示三层防线，无需等长会话自然触发
-function simulateHistory(pairCount: number): ModelMessage[] {
-  const out: ModelMessage[] = [];
-  const now = Date.now();
-  for (let i = 0; i < pairCount; i++) {
-    const ageMs = i < pairCount / 2 ? 12 * 60_000 : 7 * 60_000;
-    const when = new Date(now - ageMs);
-    const callId = `sim-${i}`;
-    const asst: ModelMessage = {
-      role: 'assistant',
-      content: [{ type: 'tool-call', toolCallId: callId, toolName: 'read_file', input: { path: `/tmp/file-${i}.txt` } }],
-    };
-    // ~1000 字符的假 tool result，让截断/TTL 都有东西可清
-    const fakeContent = `模拟文件 ${i} 的内容: `.padEnd(1000, `abcdefghij${i} `);
-    const tool: ModelMessage = {
-      role: 'tool',
-      content: [{ type: 'tool-result', toolCallId: callId, toolName: 'read_file', output: { type: 'text', value: fakeContent } }],
-    };
-    markMessageTime(asst, when);
-    markMessageTime(tool, when);
-    out.push(asst, tool);
-  }
-  return out;
-}
 
 function ask() {
     rl.question('\nYou: ', async (input) => {
@@ -226,116 +211,26 @@ function ask() {
             return;
         }
 
-        // ─── 快捷命令：直接演示三层防线效果 ────────────────────────────
-        if (trimmed === 'sim') {
-            // 注入 10 组 (assistant tool_call + tool result) = 20 条消息
-            // 每条 tool result ~1000 字符——总量 ≈ 6k tokens
-            // 时间戳：一半 12 分钟前（触发硬清）、一半 7 分钟前（触发软修剪）
-            const injected = simulateHistory(10);
-            messages.push(...injected);
-            console.log(`[Sim] 注入 ${injected.length} 条模拟历史消息`);
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'status') {
-            const tokens = estimateTokens(messages);
-            console.log(`[Status] ${messages.length} 条消息, ~${tokens} tokens (含中文 1.2x 安全系数)`);
-            // Cache 累计报告：命中率 + 成本 breakdown + cache 省了多少
-            const t = usageTracker.totals();
-            if (t.steps > 0) {
-                const hitPct = Math.round(t.cacheHitRate * 100);
-                const savedPct = Math.round(t.savedPct * 100);
-                console.log(`[Usage] ${t.steps} 步 · 命中率 ${hitPct}%`);
-                console.log(`  tokens: input=${t.inputTokens} cached=${t.cacheReadTokens} write=${t.cacheWriteTokens} output=${t.outputTokens}`);
-                console.log(`  cost: $${t.cost.toFixed(4)} (baseline $${t.baselineCost.toFixed(4)}, saved $${t.savedCost.toFixed(4)} = ${savedPct}%)`);
-            } else {
-                console.log(`[Usage] 还没有 API 调用记录（跑几轮对话就有了）`);
-            }
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'defend') {
-            const beforeTokens = estimateTokens(messages);
-            console.log(`\n--- 执行三层防线 ---`);
-            const defense = applyDefense(messages);
-            messages.splice(0, messages.length, ...defense.messages);
-            const afterTokens = estimateTokens(messages);
-            console.log(`  [Layer 2] 截断: ${defense.truncated} 条, 预算清理: ${defense.compacted} 条`);
-            console.log(`  [Layer 3] 软修剪: ${defense.softPruned}, 硬清除: ${defense.hardPruned}`);
-            console.log(`  [结果] ~${beforeTokens} → ~${afterTokens} tokens (节省 ${beforeTokens - afterTokens})`);
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'context') {
-            // 仿 Claude Code /context——16×16 网格可视化当前上下文分布
-            // 分类的字符数从 registry 里挖：mcp__ 前缀 → MCP tools，其他 active → System tools
-            let systemToolsChars = 0;
-            let mcpToolsChars = 0;
-            for (const tool of registry.getActiveTools()) {
-                const schemaLen = JSON.stringify({
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: tool.parameters,
-                }).length;
-                if (tool.name.startsWith('mcp__')) mcpToolsChars += schemaLen;
-                else systemToolsChars += schemaLen;
-            }
-            // defer 目录：name + hint 列表的字符数
-            const deferredChars = registry.getDeferredTools().reduce((sum, t) => {
-                return sum + t.name.length + (t.hint?.length ?? 0) + 6;   // "  - " + " — " ≈ 6 字符
-            }, 0);
+        // 快捷命令 dispatcher——匹配到就停止 fallthrough，否则走正常对话
+        const makePromptCtx = () => ({
+            toolCount: registry.getAll().length,
+            deferredTools: registry.getDeferredTools(),
+            sessionMessageCount: messages.length,
+            sessionId: 'default',
+        });
+        const cmdCtx: CommandContext = {
+            messages,
+            registry,
+            builder: promptBuilder,
+            tracker: usageTracker,
+            sessionStore: store,
+            makePromptCtx,
+            ask,
+            cacheState,
+            modelInfo,
+        };
+        if (dispatcher(trimmed, cmdCtx)) return;
 
-            // System prompt：跟真实每轮传给 agentLoop 的一致
-            const promptCtx = {
-                toolCount: registry.getAll().length,
-                deferredTools: registry.getDeferredTools(),
-                sessionMessageCount: messages.length,
-                sessionId: 'default',
-            };
-            const systemPromptText = promptBuilder.build(promptCtx);
-
-            // 上下文窗口：DeepSeek V4 是 128k、Mock 就当 1M 演示效果
-            const contextWindow = modelInfo.provider === 'mock' ? 1_000_000 : 128_000;
-
-            const snapshot = buildSnapshot({
-                modelDisplayName: modelInfo.provider === 'mock' ? 'Mock Model' : `${modelInfo.provider}/${modelInfo.modelName}`,
-                contextWindow,
-                systemPromptText,
-                messages,
-                tools: { systemToolsChars, mcpToolsChars, deferredChars },
-            });
-            console.log('\n' + renderContextMatrix(snapshot) + '\n');
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'usage') {
-            // Cache 效果可视化——比 status 命令更详细的 breakdown
-            // 显示：四类 tokens + 命中率进度条 + 三行成本对比
-            console.log('\n' + renderUsageSummary(usageTracker.totals()) + '\n');
-            if (!rl.closed) ask();
-            return;
-        }
-        // Cache 实验开关——on/off/裸 3 种形式
-        // 目的：让"cache 值多少钱"变成可实测对照——先跑几轮看 hit%、cache off 再跑几轮、对比 baseline vs cost
-        if (trimmed === 'cache off') {
-            cacheDisabled = true;
-            console.log(`[Cache] 已禁用——下轮开始 SYSTEM 加 nonce 破坏 cache（实验对照）`);
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'cache on') {
-            cacheDisabled = false;
-            console.log(`[Cache] 已恢复——cache 正常工作`);
-            if (!rl.closed) ask();
-            return;
-        }
-        if (trimmed === 'cache') {
-            console.log(`[Cache] 当前状态: ${cacheDisabled ? 'OFF（cache 被禁用中）' : 'ON'}`);
-            console.log(`  切换用法: "cache off" / "cache on"`);
-            if (!rl.closed) ask();
-            return;
-        }
-        // ────────────────────────────────────────────────────────────
 
         // 记住 push user 消息前的位置——本轮结束时从这里开始 flush 到磁盘
         // 策略 2：本轮结束一次性 append 新消息。崩溃丢当前轮，退出/Ctrl+C 前正常落盘
@@ -356,7 +251,7 @@ function ask() {
         await agentLoop(model, registry, messages, dynamicSystem, budget, {
             usageTracker,
             modelInfo,
-            cacheDisabled,   // true 时 SYSTEM 前面加 nonce 让 cache 全 miss
+            cacheDisabled: cacheState.disabled,   // true 时 SYSTEM 前面加 nonce 让 cache 全 miss
         });
 
         // 本轮所有新消息（user + assistant 若干 + tool 结果若干）落盘

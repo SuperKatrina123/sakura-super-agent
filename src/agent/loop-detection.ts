@@ -52,6 +52,7 @@ function stableStringify(value: unknown): string {
 }
 
 function hash(input: string): string {
+    // sha256 是密码学哈希，同样的输入 → 同样的输出
     return createHash('sha256').update(input).digest('hex').slice(0, 16);
 }
 
@@ -98,24 +99,37 @@ function getNoProgressStreak(toolName: string, argsHash: string): number {
   let lastResultHash: string | undefined;
   for (let i = history.length - 1; i >= 0; i--) {
     const r = history[i];
-    if (r.toolName !== toolName || r.argsHash !== argsHash) continue;
+    if (r.toolName !== toolName || r.argsHash !== argsHash) continue; // 跳过无关调用
     if (!r.resultHash) continue;
-    if (!lastResultHash) { lastResultHash = r.resultHash; streak = 1; continue; }
+    // 第一次匹配到，记下 baseline
+    if (!lastResultHash) {
+      lastResultHash = r.resultHash;
+      streak = 1;
+      continue;
+    }
+    // 找无进展的连续段，一旦不一样，立刻break
     if (r.resultHash !== lastResultHash) break;
     streak++;
   }
   return streak;
 }
 
+// A -> B -> A -> B -> ...
 function getPingPongCount(currentHash: string): number {
-  if (history.length < 3) return 0;
-  const last = history[history.length - 1];
+  if (history.length < 3) return 0; // 构不成循环
+
+  const last = history[history.length - 1]; // 最后一次调用A
   let otherHash: string | undefined;
   for (let i = history.length - 2; i >= 0; i--) {
-    if (history[i].argsHash !== last.argsHash) { otherHash = history[i].argsHash; break; }
+    if (history[i].argsHash !== last.argsHash) { // 找到和A不同的B
+      otherHash = history[i].argsHash;
+      break;
+    }
   }
-  if (!otherHash) return 0;
+  if (!otherHash) return 0; // 没有B，那就只有A，属于无进展循环调用
+
   let count = 0;
+  // 开始找严格交替段
   for (let i = history.length - 1; i >= 0; i--) {
     const expected = count % 2 === 0 ? last.argsHash : otherHash;
     if (history[i].argsHash !== expected) break;
@@ -128,14 +142,16 @@ function getPingPongCount(currentHash: string): number {
 // --- 主检测函数 ---
 
 export function detect(toolName: string, params: unknown): DetectionResult {
-  const argsHash = hashToolCall(toolName, params);
-  const noProgress = getNoProgressStreak(toolName, argsHash);
+  const argsHash = hashToolCall(toolName, params); // 工具调用指纹
 
+  // 循环检测
+  const noProgress = getNoProgressStreak(toolName, argsHash);
   if (noProgress >= BREAKER_THRESHOLD) {
     return { stuck: true, level: 'critical', detector: 'global_circuit_breaker', count: noProgress,
       message: `[熔断] ${toolName} 已重复 ${noProgress} 次且无进展，强制停止` };
   }
 
+  // ping-pong检测
   const pingPong = getPingPongCount(argsHash);
   if (pingPong >= CRITICAL_THRESHOLD) {
     return { stuck: true, level: 'critical', detector: 'ping_pong', count: pingPong,
@@ -146,6 +162,7 @@ export function detect(toolName: string, params: unknown): DetectionResult {
       message: `[警告] 检测到乒乓循环（${pingPong} 次交替），建议换个思路` };
   }
 
+  // 通用重复检测
   const recentCount = history.filter(h => h.toolName === toolName && h.argsHash === argsHash).length;
   if (recentCount >= CRITICAL_THRESHOLD) {
     return { stuck: true, level: 'critical', detector: 'generic_repeat', count: recentCount,
