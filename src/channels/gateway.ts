@@ -1,7 +1,7 @@
 import type { ModelMessage } from 'ai';
 import type { ChannelDefinition, IncomingMessage, OutgoingMessage } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
-import { agentLoop } from '../agent/loop.js';
+import { agentLoop, type BudgetState } from '../agent/loop.js';
 
 interface GatewayOptions {
   model: any;
@@ -9,9 +9,18 @@ interface GatewayOptions {
   buildSystem: () => string;
 }
 
+// 每个 channel session 的运行时状态——messages + 独立 budget
+// 每个 (channelName, senderId) 一份、彼此隔离：某个用户烧超预算不影响其他人
+interface ChannelSession {
+  messages: ModelMessage[];
+  budget: BudgetState;
+}
+
+const DEFAULT_BUDGET_LIMIT = 600000;   // 跟 REPL 侧对齐
+
 export class ChannelGateway {
   private channels = new Map<string, ChannelDefinition>();
-  private sessions = new Map<string, ModelMessage[]>();
+  private sessions = new Map<string, ChannelSession>();
   private options: GatewayOptions;
 
   constructor(options: GatewayOptions) {
@@ -49,18 +58,21 @@ export class ChannelGateway {
     console.log(`\n  [${channelName}] ${msg.senderName}: ${msg.text}`);
 
     if (!this.sessions.has(sessionKey)) {
-      this.sessions.set(sessionKey, []);
+      this.sessions.set(sessionKey, {
+        messages: [],
+        budget: { used: 0, limit: DEFAULT_BUDGET_LIMIT },
+      });
     }
-    const messages = this.sessions.get(sessionKey)!;
+    const session = this.sessions.get(sessionKey)!;
 
     const userMsg: ModelMessage = { role: 'user', content: msg.text };
-    messages.push(userMsg);
+    session.messages.push(userMsg);
 
     const system = this.options.buildSystem();
-    await agentLoop(this.options.model, this.options.registry, messages, system);
+    await agentLoop(this.options.model, this.options.registry, session.messages, system, session.budget);
 
     // 从 messages 里取最后一条 assistant 消息作为回复
-    const lastMsg = messages[messages.length - 1];
+    const lastMsg = session.messages[session.messages.length - 1];
     let replyText = '';
     if (lastMsg && lastMsg.role === 'assistant') {
       const content = lastMsg.content;
