@@ -25,7 +25,7 @@ import { createDispatcher, type CommandContext } from './commands/index.ts';
 import { statusHandler, contextHandler, usageHandler } from './commands/view.ts';
 import { simHandler, defendHandler } from './commands/defense.ts';
 import { cacheOffHandler, cacheOnHandler, cacheStatusHandler } from './commands/cache.ts';
-import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForgetHandler } from './commands/memory.ts';
+import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForgetHandler, memoryLintHandler, memoryDreamHandler } from './commands/memory.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -251,6 +251,8 @@ const dispatcher = createDispatcher([
   simHandler, defendHandler,
   cacheOffHandler, cacheOnHandler, cacheStatusHandler,
   memorySearchHandler, memoryReadHandler, memoryForgetHandler,
+  memoryLintHandler,   // "memory lint" / "memory lint prune" 匹配、必须在裸 memory 之前
+  memoryDreamHandler,  // "dream" / "memory dream"——Agent 自主整理记忆
   memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
 ]);
 
@@ -282,8 +284,10 @@ function ask() {
             ask,
             cacheState,
             modelInfo,
+            model,     // dream / 未来的 async 命令用来触发 agentLoop
+            budget,
         };
-        if (dispatcher(trimmed, cmdCtx)) return;
+        if (await dispatcher(trimmed, cmdCtx)) return;
 
 
         // 记住 push user 消息前的位置——本轮结束时从这里开始 flush 到磁盘

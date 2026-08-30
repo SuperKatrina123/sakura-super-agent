@@ -11,9 +11,12 @@
 - [4. 两个硬性约束：MAX_INDEX_LINES + MAX_FILE_CHARS](#4-两个硬性约束max_index_lines--max_file_chars)
 - [5. 注入 SYSTEM：buildPromptSection + memoryContext segment](#5-注入-systembuildpromptsection--memorycontext-segment)
 - [6. "记忆是线索、不是事实"——过期提醒](#6-记忆是线索不是事实过期提醒)
-- [7. 单一 `memory` 工具、五个 action](#7-单一-memory-工具五个-action)
-- [8. 生产级进阶：我们没做的三件事](#8-生产级进阶我们没做的三件事)
-- [9. 已知的坑与后续方向](#9-已知的坑与后续方向)
+- [7. 单一 `memory` 工具、六个 action](#7-单一-memory-工具六个-action)
+- [8. 记忆会坏——四种坏 × 三层手段](#8-记忆会坏四种坏--三层手段)
+- [9. Layer 2：lint 体检 + TTL 分级](#9-layer-2lint-体检--ttl-分级)
+- [10. Layer 3：dream——prompt-driven 自主整理](#10-layer-3dreamprompt-driven-自主整理)
+- [11. 生产级进阶：还没做的两件事](#11-生产级进阶还没做的两件事)
+- [12. 已知的坑与后续方向](#12-已知的坑与后续方向)
 
 ## 0. 为什么需要跨会话记忆
 
@@ -342,9 +345,9 @@ Mem0 报告的 **33% / 90 天不准确率**——记忆会过期是必然。**�
 
 **"时间戳应该跟数据在一起、不该依赖文件系统"**——这是 v2 加 `createdAt` 字段的核心考虑。
 
-## 7. 单一 `memory` 工具、五个 action
+## 7. 单一 `memory` 工具、六个 action
 
-代码在 [`src/tools/memory-tools.ts`](../src/tools/memory-tools.ts)——一个工具、五个 action：
+代码在 [`src/tools/memory-tools.ts`](../src/tools/memory-tools.ts)——一个工具、六个 action：
 
 ```
 save    保存新记忆（name/description/type/content）
@@ -352,11 +355,12 @@ list    列出所有记忆
 search  按关键词搜索（query）
 read    读取单条完整内容（name）
 delete  删除一条记忆（name）
+lint    体检 + 可选清理（prune=true 才动手删）
 ```
 
-### 7.1 为什么单一工具、不拆五个
+### 7.1 为什么单一工具、不拆六个
 
-**成本**：五个独立工具 = 五份 schema 常驻 SYSTEM = 更多 tokens
+**成本**：六个独立工具 = 六份 schema 常驻 SYSTEM = 更多 tokens
 
 **认知**：Agent 一次学会"记忆管理"这一个 mental model、比学会五个分别的操作简单
 
@@ -395,11 +399,217 @@ type 分四类：
 
 **Enum 强制归类**：`type: enum ['user', 'feedback', 'project', 'reference']`——Agent 无法归类的信息就不该存。**这是分类的隐性守门员**。
 
-## 8. 生产级进阶：我们没做的三件事
+## 8. 记忆会坏——四种坏 × 三层手段
 
-这一节讲**我们没做但生产系统会做的三件事**——不是遗憾、是**教学项目和生产系统的自然边界**。
+前面所有设计都是**入口过滤**——让好的进来、坏的进不来。但**已经进来的记忆也会变坏**：
 
-### 8.1 精选注入：不是所有记忆都该塞进上下文
+**四种坏**：
+
+| 坏法 | 表现 | 后果 |
+|---|---|---|
+| **污染** | 把推测当事实存了（"项目用 MySQL"—— 实际迁到 PostgreSQL 了） | Agent 基于错误信息决策 |
+| **爆炸** | 只存不删、信噪比越来越低 | 500 条挑 5 条相关的、搜出来基本没用 |
+| **过期** | 代码变了、记忆没跟上 | **最隐蔽、最危险**——Agent 不会怀疑自己的记忆 |
+| **冲突** | 新旧记忆互相矛盾 | Agent 不知道信谁、行为漂移 |
+
+**三层手段**：
+
+| 手段 | 应对 | 何时跑 | 成本 |
+|---|---|---|---|
+| **不存清单**（Layer 1） | 污染 | Agent 存记忆时 | 零成本（prompt + validator 规则） |
+| **lint + TTL 分级**（Layer 2） | 过期 + 爆炸 | 手动或定期跑 | 低成本（纯规则、无 LLM） |
+| **dream 自动整理**（Layer 3） | 冲突 + 残留 | 用户显式触发 | 高成本（一次 agent loop） |
+
+**核心哲学跟前面几层一致**：**能用 prompt 教育解决的用教育、能用规则清理的用规则、需要判断的交给 Agent**。**从便宜到贵、层层递进**。
+
+### 8.1 Layer 1：不存清单 = SYSTEM 里的原则
+
+前面 §5 讲的 `buildPromptSection` 输出、末尾已经嵌了：
+
+```
+记忆使用原则：
+- 记忆是线索，不是事实——使用前先用工具验证（read_file、grep 确认）
+- 不存代码能推导的、git 能查的、文档已经写了的
+- 只存对话中出现的、其他地方推导不出来的信息
+```
+
+**这是"教育"而不是"拦截"**：
+
+- Agent 每轮进 loop 时都看到这段原则
+- **在"决定要不要 save"之前**、已经知道不该存什么
+- 依赖 Agent 遵守——**教育式比拦截式更前置、零 tool call 浪费**
+
+**"教育原则 vs 拦截规则"的区别**：
+- Rule（拦截规则）**只能捕获能编码的模式**——关键词、正则
+- Principle（原则）**能应对没预料到的场景**——Agent 判断"这是不是事实"、比 validator 灵活
+
+## 9. Layer 2：lint 体检 + TTL 分级
+
+Layer 1 是"入口不让脏东西进"。**已经进来的呢**？——**过期防御、爆炸清理**——都归 Layer 2。
+
+代码在 [`src/memory/validator.ts`](../src/memory/validator.ts) + [`src/memory/store.ts`](../src/memory/store.ts) 的 `lintAndPrune()`。
+
+### 9.1 四种 type 的差异化 TTL
+
+**"越久越有价值"的记忆永不过期**——这是最重要的设计选择：
+
+| Type | TTL | 逻辑 |
+|---|---|---|
+| **`user`** | 永不过期 | 用户画像稳定、几年不变 |
+| **`feedback`** | 永不过期 | 行为规则应长期遵守 |
+| **`project`** | 30 天 | 进行中的工作衰减最快 |
+| **`reference`** | 90 天 | 外部资源位置稳定但要定期验证 |
+
+**为什么 user / feedback 永不过期**：**这两类是"越久越有价值"的记忆**——用户三年前告诉你的偏好、你今天还应该遵守。**随便清就废了 Agent 的长期学习**。
+
+### 9.2 三种诊断结果 + LRU 语义
+
+validator 对每条 memory 输出**issue 数组**、每个 issue 有 severity：
+
+| Issue kind | severity | 语义 | 处理 |
+|---|---|---|---|
+| **stale_path** | warn | 引用的代码路径不存在 | 保留、附警告 |
+| **stale_content** | warn | 含推测词 / 时效性词 | 保留、附警告 |
+| **duplicate_name** | warn | 跨记忆重名（同一 name 出现多次） | 保留、让人合并 |
+| **expired** | delete | 超过 type 对应 TTL | 建议删除 |
+
+**关键的 LRU 语义**：TTL 判断用 **`lastReadAt`**（不是 `createdAt`）——**经常被读的记忆不会被清**。真正有价值的信息自动幸存。
+
+**实现**：
+- `save()` 记 `lastWriteAt` + `createdAt`
+- `markRead()` 记 `lastReadAt`——`read` / `search` 命中时主动调
+- `parseFile()` 不改磁盘（性能）、`markRead` 才写
+
+### 9.3 "体检"和"手术"分开
+
+`lintAndPrune(baseDir, pruneExpired = false)` —— **默认只诊断**：
+
+```
+memory lint             → 只诊断、列出问题
+memory lint prune       → 真删过期条目
+```
+
+**分开是设计选择**：
+
+- **前者是"体检"**——每次都可以跑、无副作用、纯读
+- **后者是"手术"**——需要用户确认
+
+**Agent 收到诊断报告后能自主判断**"这条我要保留、那条建议删"——比盲目清理稳。
+
+### 9.4 duplicate_name 只 warn、不 delete
+
+Agent 有时候会在不同时间点存两条名字相同但内容不一样的记忆——**这是冲突信号、不是简单的重复**。
+
+- 内容 A：一个月前存的"用户偏好 TypeScript"
+- 内容 B：昨天存的"用户偏好 TypeScript、但项目允许时用 Rust"
+
+**这两条自动 delete 谁都不对**——**让人（或 Agent 通过 dream）来判断**。所以 lint 只警告、不动手。
+
+### 9.5 三个结构性 lint 规则
+
+除了 TTL、validator 还检查**结构性问题**（跟时间无关）：
+
+```ts
+const SPECULATIVE_PATTERN = /(可能|大概|应该|似乎|好像|probably|maybe|estimate|guess)/i;
+const TEMPORAL_PATTERN = /(当前|目前|现在|今天|本周|这周|下周|this week|currently|nowadays|as of)/i;
+const CODE_PATH_PATTERN = /\b(?:src|lib|app|test|tests|scripts?)\/[\w/.-]+\.(?:ts|tsx|js|jsx|py|go|rs|java)\b/g;
+```
+
+- **推测词命中** → warn "含推测词、建议改成事实性表述"
+- **时效性词命中** → warn "可能已过时、建议改成绝对日期"
+- **代码路径命中** → **动态检测**：`fs.existsSync(path)`——路径不存在就 warn
+
+**动态检测比正则更准**——文件被删了、rename 了都能立刻发现。
+
+## 10. Layer 3：dream——prompt-driven 自主整理
+
+Layer 2 是**规则**——能覆盖 80% 的清理需求。但**"这两条重复、哪个内容更全"** 这类判断、规则表达不了。
+
+Layer 3 是**dream**——**把 lint 报告丢给 Agent、让它自主判断**。
+
+代码在 [`src/commands/memory.ts`](../src/commands/memory.ts) 的 `memoryDreamHandler`。
+
+### 10.1 核心洞察：dream 是 prompt、不是 hardcoded 逻辑
+
+**Rule-driven（硬编码）** 会长这样：
+
+```ts
+if (duplicate) merge();
+else if (staleTTL) delete();
+else if (stalePathAndOld) delete();
+```
+
+- 每种 case 都要提前想到、写死
+- 复杂决策（"哪个内容更全"）**规则表达不了**
+- 修一个决策要改代码
+
+**Prompt-driven** 长这样：
+
+```ts
+const dreamPrompt = [
+  '阶段 1: memory action=lint 扫描全库',
+  '阶段 2: 按 severity 判断动作',
+  '  - delete 的直接删',
+  '  - duplicate 的对比后保留更新的',
+  '  - stale 的 save 覆盖修正',
+  '阶段 3: 总结这次做了什么',
+].join('\n');
+```
+
+**修决策 = 改 prompt、不改代码**。**这是 Claude Code AutoDream 的核心思路**——dream 本质是 prompt、不是一段写死的代码。
+
+### 10.2 三阶段编排
+
+Dream prompt 明确指导三个阶段：
+
+**阶段 1：定位** —— Agent 调 `memory action=lint`、拿到全库诊断报告
+- 报告已包含每条 issue 的 severity + description
+- **不需要逐条 read**——lint 输出已经够 Agent 判断
+
+**阶段 2：整理** —— Agent 根据 severity 决定动作：
+- `severity=delete`（expired）→ 直接 `memory action=delete`
+- `duplicate_name` → `memory action=read` 对比 → 保留新的、删旧的
+- `stale_path / stale_content` → 内容仍有价值就 `memory action=save` 覆盖修正
+
+**阶段 3：报告** —— Agent 用一段文字总结这次做了什么
+
+**关键**：阶段 1 已经给 Agent 结构化数据（lint 报告）、**阶段 2 的具体决策交给 Agent**——**编排管顺序、决策交给智能**。
+
+### 10.3 为什么让 dream 用全部工具、不限制
+
+一个非显然的决策——Agent 走 dream 时**保留全部工具**（grep / read_file / bash / rag_search 等），不只限制在 memory 工具。
+
+**理由**：dream 是"整理任务"、复杂决策可能需要**外部验证**：
+
+- 判断 stale_path 时——`grep` 或 `ls` 确认文件真的不存在
+- 判断 duplicate 时——`read_file` 看看代码是不是真的用了这条记忆里说的东西
+- 判断 stale_content 时——`rag_search` 找文档看现在的说法
+
+**限制工具集会让 dream 决策变差**——**"trust the Agent"** 的哲学在这里落地。
+
+### 10.4 dream 是"手动触发"、不是自动
+
+我们没做"Claude Code AutoDream 那种 idle detection"——**用户显式跑 `dream` 命令才触发**。
+
+**理由**：
+
+- dream 会跑一次完整的 agentLoop——**几秒到几十秒、几分钱**
+- 自动触发的时机很难设——太频繁贵、太稀疏没效果
+- **让用户决定"什么时候整理"更简单**——就像手动 `git gc` 而不是自动跑
+
+生产上想做自动触发、有两种方向：
+- **idle detection**：用户 5 分钟没输入就跑
+- **阈值触发**：`lint` 里 warn + toDelete 数量超阈值时提示"该 dream 了"
+
+留作后续。
+
+## 11. 生产级进阶：还没做的两件事
+
+这一节讲**我们没做但生产系统会做的两件事**——不是遗憾、是**教学项目和生产系统的自然边界**。
+
+（**AutoDream 我们已经做了**——见 §10、Layer 3、prompt-driven 版本。区别在于我们不自动触发、要用户手动 `dream`。）
+
+### 11.1 精选注入：不是所有记忆都该塞进上下文
 
 **问题**：当前把索引整个注入 SYSTEM。记忆少时没问题、但**积累 200 条时索引本身就几 KB**——其中大部分跟当前对话无关。
 
@@ -411,7 +621,7 @@ type 分四类：
 
 **朝这个方向走一小步**（不引入 LLM）：`buildPromptSection` 可以接收当前对话的 messages、做纯字符串 keyword extraction + search、只注入相关的几条。精度比 LLM 差、但零成本。留作后续。
 
-### 8.2 后台自动提取：用户无感知的记忆写入
+### 11.2 后台自动提取：用户无感知的记忆写入
 
 **问题**：当前依赖 Agent 主动调 `memory` action=save。但很多值得记的信息不是用户明确要求存的——"我上周升 Tech Lead 了"这句话出现在闲聊里、Agent 应该自己识别出来存为 user 类型记忆。
 
@@ -423,64 +633,64 @@ type 分四类：
 
 **一个非显然的坑**：**"什么该被提取"跟主 Agent 判断"什么该 save"是同一个问题**——只是把判断延后到对话结束。如果主 Agent 判断力不足、后台 Agent 大概率也不足。**前提是主 Agent 主动 save 的准确率已经测过、明显不够**。
 
-### 8.3 AutoDream：记忆的睡眠整理
+### 11.3 共同前提：后台 Agent 基础设施
 
-**Anthropic 给 Claude Code 加了一个叫 AutoDream 的功能**——在用户不活跃时、后台 Agent 整理记忆：合并重复信息、把相对日期转成绝对日期、删除矛盾的旧记忆、清理过时的条目。**类比人类的"睡眠记忆巩固"**——白天积累、晚上整理。
-
-**我们为什么不做**：
-
-1. **触发时机在 REPL 里没有对应概念**——用户可能几天不回来、"idle" 定义不清
-2. **200 条以内手工整理就行**——用户偶尔 `memory forget` 一次
-3. **合并矛盾记忆需要又一次 LLM 调用**——又一层复杂度和容错
-
-**AutoDream 只在"7x24 running Agent"或"多用户 SaaS"场景值得做**。教学项目单进程 REPL 用不上。
-
-### 8.4 共同前提：后台 Agent 基础设施
-
-这三个特性看似不同、共享同一个基础设施——**能在后台 fork 一个"低成本 Agent"**。**引入这个基础设施的成本可能大于当前 memory 系统全部代码**。
+这两个特性共享同一个基础设施——**能在后台 fork 一个"低成本 Agent"**。**引入这个基础设施的成本可能大于当前 memory 系统全部代码**。
 
 **教学项目的定位是"看清核心机制"**：
 
 - **精选注入的核心机制**：description 是相关性信号 → 我们**已经做了**（工具 description 强调 description 是检索关键字段）
 - **后台提取的核心机制**：判断"值得记吗" → 我们**已经隐性做了**（Agent 主动 save 就是运行时判断）
-- **AutoDream 的核心机制**：定期清理过时记忆 → 我们**已经隐性做了**（LRU 淘汰 + 24h 过时提醒）
+- **AutoDream 的核心机制**：定期清理过时记忆 → 我们**已经完整做了**（Layer 3、只是手动触发）
 
 **每个生产特性的"魂"我们都做了、只是没做"异步 + fork"那一层**——那一层是规模化优化、不是理解 memory 系统的必要。
 
-## 9. 已知的坑与后续方向
+## 12. 已知的坑与后续方向
 
 **1. 关键词 search 精度有限**
 
-当前 `search()` 是 `name + description + content` 做 OR 匹配。中文分词差、同义词不识别。生产该接 embedding 或 LLM 精选（见 §8.1）。
+当前 `search()` 是 `name + description + content` 做 OR 匹配。中文分词差、同义词不识别。生产该接 embedding 或 LLM 精选（见 §11.1）。
 
 **2. 无冲突检测**
 
 save 时同名 filename 直接覆盖。**没有"这条记忆跟已有的 X 矛盾"** 的检测——如果用户先说"喜欢 TypeScript"、又说"最近想学 Rust"、两条都会存下、Agent 看到两个可能觉得矛盾。
 
-生产该做**语义冲突检测**——需要 LLM 或规则引擎、复杂度不匹配教学项目。
+Layer 3 dream **能间接处理**——Agent 看到 duplicate_name 或语义矛盾时判断合并。但 lint 层面没有"语义矛盾检测"——是规则表达不了的。
 
-**3. LRU 淘汰只按顺序、不按"最近使用"**
+**3. LRU 淘汰只按 lastReadAt——不算 write**
 
-真正的 LRU 应该按"最近被 read 或 search 命中"排序——当前只按"插入顺序"淘汰。**如果一条 3 年前存的、每天用一次的 user 类记忆、被 200 条最近的低价值 project 记忆挤掉**——语义上错。
+当前 TTL 判断只看 `lastReadAt`。**如果 Agent 频繁 update 但没 read** 的记忆——按 LRU 会被误清。
 
-修法：加 `lastAccessedAt` 字段、search/read 时更新。留作后续。
+修法：TTL 用 `max(lastReadAt, lastWriteAt)`——只要有更新或访问就算"活着"。留作后续小修。
 
-**4. 24h 过期提醒是硬编码**
+**4. 24h 过期提醒硬编码**（跟 TTL 分级独立）
 
-不同 type 的过期速度不同——`user` 记忆几年不变、`project` 一周就过期。当前一刀切 24h、准确率有限。生产该按 type 差异化：
+`buildPromptSection` 里的"超 24 小时附加验证提示"跟 §9 的 TTL 分级是**两套系统**：
 
-- `user`: 90 天以上才提醒
-- `feedback`: 30 天
-- `project`: 7 天甚至更短
-- `reference`: 30 天（要提醒验证）
+- 24h 提醒：提示 Agent"验证"、不删——**用侧策略**
+- TTL 分级：满足条件的直接删——**存侧策略**
 
-**5. 描述字段没做质量保证**
+两者互补、但可以更精细。生产可以按 type 差异化 24h 提醒——`user` 30 天才提醒、`project` 1 天就提醒。
+
+**5. dream 没有 dry-run 模式**
+
+现在 dream 一跑就是完整 loop——Agent 直接动手删/合并。**没法"先看看它想干什么、再决定要不要执行"**。
+
+修法：加 `dream --preview` 参数、prompt 里改成"只输出计划、不执行任何修改"。留作后续。
+
+**6. dream 触发是完全手动、无自动化**
+
+见 §10.4——**用户显式跑 `dream`**。生产可以做：
+- **idle detection**：用户 5 分钟没输入就跑
+- **阈值触发**：`lint` warn + toDelete 超阈值时提示
+
+**7. 描述字段没做质量保证**
 
 description 越精确、search 越准。但 Agent 写的 description 质量参差不齐——有的一句话精准、有的照抄 name。**没有反馈机制**告诉 Agent"你上次写的 description 太模糊"。
 
 一个可能的改进：`memory` 工具 description 里加"description 应该 20-60 字符、包含关键动词和名词"这类具体约束。当前只强调"精确"、太抽象。
 
-**6. 无 export / import**
+**8. 无 export / import**
 
 memory 目前只能通过 markdown 文件手动看。**没有 dump 全部到一个 archive、或者 import 别的项目的 memory**。生产上应该有个 `memory export` / `memory import` 命令。
 

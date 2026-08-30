@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { validateAll, summarize, type EntryReport, type LintSummary } from './validator.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MemoryStore：索引 + 分散 markdown 文件的记忆系统
@@ -41,7 +42,11 @@ export interface MemoryEntry {
   type: MemoryType;
   content: string;
   filePath: string;     // 相对 .memory/ 的文件名（比如 "user_typescript.md"）
-  createdAt?: string;   // ISO 时间戳——用于判断"过时提醒"（超过 1 天的记忆附加验证提示）
+  createdAt?: string;   // ISO 时间戳——记忆写入时间
+  // ↓ LRU 语义支持（validator TTL 用）
+  lastWriteAt?: string; // 最近修改时间（同 createdAt 更新、覆盖 save 时更新）
+  lastReadAt?: string;  // 最近读取时间——每次 parseFile / search 命中时更新
+                        //   TTL 判断用这个字段：**经常被读的记忆不该被清**
 }
 
 const MEMORY_DIR = '.memory';
@@ -82,6 +87,18 @@ export class MemoryStore {
       .replace(/^-|-$/g, '');
   }
 
+  // 读老文件的 createdAt——覆盖 save 时保留原始创建时间
+  // 找不到（新文件、格式坏）返回 undefined、caller 用 now 当 createdAt
+  private tryReadCreatedAt(filename: string): string | undefined {
+    const fullPath = path.join(this.memoryDir, filename);
+    if (!fs.existsSync(fullPath)) return undefined;
+    const raw = fs.readFileSync(fullPath, 'utf-8');
+    const m = /^---\n([\s\S]*?)\n---/.exec(raw);
+    if (!m) return undefined;
+    const kv = /^createdAt:\s*(.+)$/m.exec(m[1]);
+    return kv?.[1].trim();
+  }
+
   // 写入一条 memory：写文件 + 更新索引
   // 已存在同名 → 覆盖（这是 v1 的策略、简单直白）
   // 索引达到 200 行 → LRU 淘汰最早的（腾位置）
@@ -101,14 +118,21 @@ export class MemoryStore {
 
     // YAML frontmatter + markdown body
     // 用 frontmatter 而不是纯 JSON——**给人读也给模型读**
-    // createdAt 用来判断"过时提醒"——超过 1 天的记忆在注入 SYSTEM 时附加验证提示
-    const createdAt = new Date().toISOString();
+    // 三个时间戳：
+    //   - createdAt   首次写入（老条目更新时保留原值、不覆盖）
+    //   - lastWriteAt 最近修改（覆盖 save 时更新）
+    //   - lastReadAt  最近读取（每次 parseFile/search 命中时更新——不在 save 里写）
+    const now = new Date().toISOString();
+    // 更新时保留原 createdAt——需要先看老文件有没有
+    const existingCreatedAt = this.tryReadCreatedAt(filename);
+    const createdAt = existingCreatedAt ?? now;
     const fileContent = [
       '---',
       `name: ${entry.name}`,
       `description: ${entry.description}`,
       `type: ${entry.type}`,
       `createdAt: ${createdAt}`,
+      `lastWriteAt: ${now}`,
       '---',
       '',
       content,
@@ -169,8 +193,9 @@ export class MemoryStore {
     return entries;
   }
 
-  // 解析单个 memory 文件——提取 frontmatter 三字段 + body
-  // 格式不对返回 null（跳过、不抛错）
+  // 解析单个 memory 文件——提取 frontmatter 字段 + body
+  // **纯读、不改磁盘**——list() 里循环调、若每次都 write 磁盘会拖慢启动
+  // lastReadAt 更新走独立的 markRead() 方法、由 read/search 命中时主动调
   private parseFile(filename: string): MemoryEntry | null {
     const fullPath = path.join(this.memoryDir, filename);
     if (!fs.existsSync(fullPath)) return null;
@@ -198,7 +223,27 @@ export class MemoryStore {
         : content,
       filePath: filename,
       createdAt: meta.createdAt,   // 老文件可能没这个字段——保持 undefined、不做过期判断
+      lastWriteAt: meta.lastWriteAt,
+      lastReadAt: meta.lastReadAt,
     };
+  }
+
+  // 更新一条 memory 的 lastReadAt——read/search 命中时主动调
+  // 只改 frontmatter 的 lastReadAt 那一行、不重写整个文件
+  // 找不到文件静默返回——不抛错、不阻断主流程
+  markRead(filename: string): void {
+    const fullPath = path.join(this.memoryDir, filename);
+    if (!fs.existsSync(fullPath)) return;
+    const raw = fs.readFileSync(fullPath, 'utf-8');
+    const now = new Date().toISOString();
+
+    // frontmatter 里已有 lastReadAt → 替换、否则在 --- 前插一行
+    const hasLastRead = /^lastReadAt:\s*.+$/m.test(raw);
+    const updated = hasLastRead
+      ? raw.replace(/^lastReadAt:\s*.+$/m, `lastReadAt: ${now}`)
+      : raw.replace(/^---$/m, `lastReadAt: ${now}\n---`);   // 第一个 --- 之前插
+
+    fs.writeFileSync(fullPath, updated, 'utf-8');
   }
 
   // 关键词搜索——按 name + description + content 匹配
@@ -274,8 +319,10 @@ export class MemoryStore {
       '记忆索引：',
       index,
       '',
-      '使用 memory 工具的 read 操作来读取具体记忆内容。',
-      '**记忆是线索，不是事实——使用前先验证其准确性。**',
+      '记忆使用原则：',
+      '- 记忆是线索，不是事实——使用前先用工具验证（read_file、grep 确认）',
+      '- 不存代码能推导的、git 能查的、文档已经写了的',
+      '- 只存对话中出现的、其他地方推导不出来的信息',
     ];
 
     if (staleCount > 0) {
@@ -284,6 +331,28 @@ export class MemoryStore {
     }
 
     return lines.join('\n');
+  }
+
+  // Lint 体检：跑 validator 全库、返回诊断报告 + 汇总
+  // pruneExpired=true 会**执行**删除（severity=delete 的）——默认 false、只诊断
+  // 分开是设计选择：**"看看有没有问题"和"清理"是两件事**
+  //   - 前者是"体检"、每次都可以跑、无副作用
+  //   - 后者是"手术"、需要用户确认——教学项目里 tool 层 default false、显式传 true 才动手
+  lintAndPrune(baseDir = '.', pruneExpired = false): { reports: EntryReport[]; summary: LintSummary; pruned: number } {
+    const entries = this.list();
+    const reports = validateAll(entries, baseDir);
+
+    let pruned = 0;
+    if (pruneExpired) {
+      for (const report of reports) {
+        const shouldDelete = report.issues.some(i => i.severity === 'delete');
+        if (shouldDelete) {
+          if (this.delete(report.entry.name)) pruned++;
+        }
+      }
+    }
+
+    return { reports, summary: summarize(reports), pruned };
   }
 
   // Debug——启动时打印当前 memory 状态

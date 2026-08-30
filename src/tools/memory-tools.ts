@@ -65,7 +65,7 @@ save 时的分类规则（**决定 memory 系统的长期质量**）:${SAVE_RULE
       properties: {
         action: {
           type: 'string',
-          enum: ['save', 'list', 'search', 'read', 'delete'],
+          enum: ['save', 'list', 'search', 'read', 'delete', 'lint'],
           description: '五个动作之一',
         },
         name: {
@@ -97,7 +97,7 @@ save 时的分类规则（**决定 memory 系统的长期质量**）:${SAVE_RULE
     isConcurrencySafe: false,
     isReadOnly: false,
     execute: async (args: {
-      action: 'save' | 'list' | 'search' | 'read' | 'delete';
+      action: 'save' | 'list' | 'search' | 'read' | 'delete' | 'lint';
       name?: string;
       description?: string;
       type?: MemoryType;
@@ -139,16 +139,19 @@ save 时的分类规则（**决定 memory 系统的长期质量**）:${SAVE_RULE
           if (!args.query) return '搜索失败：search 需要 query 参数';
           const results = memoryStore.search(args.query);
           if (results.length === 0) return `没有找到与 "${args.query}" 相关的记忆`;
+          // 命中的每条 memory 都算"被使用了"——更新 lastReadAt 支持 LRU
+          for (const r of results) memoryStore.markRead(r.filePath);
           return `搜索结果（${results.length} 条匹配 "${args.query}"）：\n`
             + results.map(e => `  [${e.type}] ${e.name} — ${e.description}`).join('\n');
         }
 
         case 'read': {
           if (!args.name) return '读取失败：read 需要 name 参数';
-          // read 返回完整内容——name 找不到就返回明确提示、方便 Agent 换关键词重试
           const entries = memoryStore.list();
           const target = entries.find(e => e.name === args.name);
           if (!target) return `没找到名为 "${args.name}" 的记忆。用 memory action=list 看现有条目`;
+          // 真读了——更新 lastReadAt、告诉 validator "这条最近还在用、别 TTL 删了"
+          memoryStore.markRead(target.filePath);
           return `记忆 "${target.name}" (${target.type}):\n\n${target.content}`;
         }
 
@@ -160,8 +163,34 @@ save 时的分类规则（**决定 memory 系统的长期质量**）:${SAVE_RULE
             : `没找到名为 "${args.name}" 的记忆`;
         }
 
+        case 'lint': {
+          // 体检：跑 validator 全库、看有哪些问题——**默认不删**、只诊断
+          // Agent 拿到报告后可以选择：调 delete 手动清、或者接受"待验证"提示
+          // 参数 prune 显式传 true 才动手删过期条目
+          const prune = (args as { prune?: boolean }).prune === true;
+          const { reports, summary, pruned } = memoryStore.lintAndPrune('.', prune);
+          const lines = [
+            `[Memory Lint] 共 ${summary.total} 条：ok=${summary.ok} / warn=${summary.warn} / toDelete=${summary.toDelete}`,
+            `  分类：stale_path=${summary.byKind.stale_path} / expired=${summary.byKind.expired} / stale_content=${summary.byKind.stale_content} / duplicate_name=${summary.byKind.duplicate_name}`,
+          ];
+          if (prune) {
+            lines.push(`  已删除：${pruned} 条`);
+          } else if (summary.toDelete > 0) {
+            lines.push(`  提示：${summary.toDelete} 条建议删除、加参数 prune=true 才会实际清理`);
+          }
+          // 有 issue 的详情——Agent 看到能判断哪些要处理
+          for (const r of reports) {
+            if (r.issues.length === 0) continue;
+            lines.push(`\n  [${r.entry.type}] ${r.entry.name}:`);
+            for (const i of r.issues) {
+              lines.push(`    - ${i.severity === 'delete' ? '✗' : '⚠'} ${i.message}`);
+            }
+          }
+          return lines.join('\n');
+        }
+
         default:
-          return `未知 action: ${(args as { action: string }).action}——支持: save / list / search / read / delete`;
+          return `未知 action: ${(args as { action: string }).action}——支持: save / list / search / read / delete / lint`;
       }
     },
   };
