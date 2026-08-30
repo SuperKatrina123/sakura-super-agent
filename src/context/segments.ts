@@ -48,14 +48,6 @@ export function deferredTools(): PipeFn {
   };
 }
 
-// memoryContext: 把 memory 索引注入 SYSTEM
-// - 两轮之间可能变（用户存了新记忆）、一轮内稳定
-// - 放在 coreRules / toolGuide 之后、deferredTools / sessionContext 之前
-//   保持"先静后动"原则、cache 前缀尽可能长
-// - store 未挂载时不出现（避免测试场景强制依赖）
-export function memoryContext(): PipeFn {
-  return (ctx) => {
-    if (!ctx.memoryStore) return null;
-    return ctx.memoryStore.buildPromptSection();
-  };
-}
+// memoryContext / ragContext 挪到 src/context/prompt-pipes.ts
+// 那些 pipe 依赖外部组件（MemoryStore / EmbeddedChunk[]）、通过闭包捕获
+// 这个文件只放"纯 ctx pipe"——依赖 PromptContext 里的数据、不依赖运行时组件

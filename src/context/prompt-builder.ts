@@ -1,16 +1,15 @@
-import type { MemoryStore } from '../memory/store.ts';
-
 // PromptContext: segment 能拿到的运行时数据
 // 原则：只放"数据"、不放"格式化好的字符串"——格式化是 segment 的职责
 // 这样将来想改 defer 目录的呈现方式（表格 / 分组 / top-N），只动 segment 不动 registry
+//
+// 什么该放这里、什么不该：
+//   ✓ 每轮变的运行时状态（tool count / message count / deferredTools 列表）
+//   ✗ 外部组件（MemoryStore / EmbeddedChunk[]）——通过闭包捕获、见 prompt-pipes.ts
 export interface PromptContext {
   toolCount: number;
   deferredTools: Array<{ name: string; hint?: string }>;   // 原始列表，segment 自己拼
   sessionMessageCount: number;
   sessionId: string;
-  // memory store 引用——memoryContext segment 会调它的 buildPromptSection()
-  // 传引用而不是原始数据：memory 有 "过期提醒" 之类的动态逻辑、留在 store 内聚
-  memoryStore?: MemoryStore;
 }
 
 // PipeFn: 一个函数决定"要不要出现"+"出现时长啥样"
