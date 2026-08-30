@@ -661,6 +661,71 @@ Plugin 注册的工具会被自动加 `pluginName__` 前缀——supabase plugin
 
 未配 `SUPABASE_URL` 时走 mock 分支、直接可以看到 Agent 调用效果。
 
+## 📡 Channel 系统
+
+> 📖 本节只是速览。完整设计（三个正交扩展维度、Session 隔离的 budget 意义、buildSystem closure、Channel 作为 Plugin 扩展点的前瞻），见 [docs/channel-system-design.md](docs/channel-system-design.md)。
+
+**问题**：前面所有能力都困在 REPL 里——**只有一个人能用、只在一台机器上跑**。真实需求是飞书群里 @机器人、Slack DM、邮件触发、Web 表单——**同一个 Agent、多种入口**。
+
+**方案**：把"消息进来 → 触发 loop → 回复出去"抽象成 `ChannelDefinition`——REPL 本质上也是 channel 的一个特例。
+
+### 三个正交扩展维度
+
+前面装的所有系统都在扩展**能力**（Tool / Skill / Plugin）或**知识**（Memory / RAG）。Channel 引入**第三个维度**——**通道**（Agent 服务谁）：
+
+| 维度 | 抽象 | 例子 |
+|---|---|---|
+| 能力：Agent 能做什么 | Tool / Skill / Plugin | `bash` / code-review / supabase |
+| 知识：Agent 知道什么 | Memory / RAG | 用户偏好 / 项目文档 |
+| **通道：Agent 服务谁** | **Channel** | REPL / 飞书 / Slack |
+
+**正交的意义**：加个 supabase plugin 不用管飞书、加个飞书 channel 不用管 supabase——**n × m 的组合爆炸缩成 n + m**、架构杠杆核心所在。
+
+### ChannelDefinition：极简 4 方法契约
+
+```ts
+export interface ChannelDefinition {
+  name: string;
+  description: string;
+  start(): Promise<void> | void;
+  stop(): Promise<void> | void;
+  send(message: OutgoingMessage): Promise<void>;
+  onMessage?: (handler: (msg: IncomingMessage) => void) => void;
+}
+```
+
+- `start` / `stop`：**跟 Plugin 的 activate / destroy 平行**——channel 也有长连接、HTTP 服务器等需要显式清理
+- `send`：出站消息——channel 决定怎么翻译成原生格式
+- `onMessage` 可选：**纯发送 channel**（比如告警通知）不用实现
+
+### 每个 sender 独立 session + budget
+
+`(channelName, senderId)` 一份独立 `ChannelSession { messages, budget }`——**为什么两者都要独立**：
+
+- **messages 独立** obvious——A 说的 B 不该看到
+- **budget 独立** 隐性但重要——**共用 budget**：A 用户狂问烧完 600k、B 用户第一次问就被拒。**"资源份额跟着用户走"是多租户通用原则**
+
+### buildSystem closure
+
+Gateway 拿一个 `buildSystem: () => string` 闭包、**每次调都用当前 registry 状态重新 build**——tool_search 激活的工具、Plugin 动态注册的工具、下一次消息进来就能看到。**Gateway 跟主进程唯一的活状态耦合点**。
+
+### 停机顺序：channel → plugin → MCP
+
+**下游先停、上游后停**：channel 先关新消息进不来、plugin 才能安全清资源、MCP 最后关子进程。
+
+### 内置示范：飞书长连接 + Dashboard
+
+`src/channels/feishu.ts` 用 lark SDK 长连接接飞书：
+- **收消息**：注册 `im.message.receive_v1`、自动去 `@Bot` mention 标记
+- **发消息**：REST API `im.message.create`
+- **Dashboard**：`node:http` 起 http://localhost:3000 状态面板、零依赖、显示"是否配了飞书 / 长连接是否建立"
+
+**长连接 vs Webhook**：长连接**本地开发不用 ngrok**、SDK 主动连飞书服务端、心智负担最低。
+
+### Channel 作为 Plugin 的扩展点（前瞻）
+
+跟 [Plugin 那一篇](docs/plugin-system-design.md) 留的伏笔呼应——**未来给 PluginApi 加 `registerChannel`、Plugin 就能动态注册通道**。写个 Telegram plugin 传进来、Agent 自动多一个 Telegram 通道、不用改核心代码、不用重新部署。**这是"API 隔离层"真正兑现价值的地方**——生态里任何人实现 ChannelDefinition、通过 Plugin 挂进来即可。
+
 ## 快速开始
 
 ```bash
@@ -713,6 +778,10 @@ src/
 │   ├── types.ts             # PluginDefinition / PluginApi / PluginConfig
 │   ├── manager.ts           # PluginManager:activate/destroy 编排 + 前缀化 + env vars + 错误隔离
 │   └── supabase-plugin.ts   # 示范 plugin:list_tables / query / insert + mock 模式
+├── channels/
+│   ├── types.ts             # ChannelDefinition / IncomingMessage / OutgoingMessage
+│   ├── gateway.ts           # ChannelGateway:注册 / 生命周期 / 独立 session + budget 路由
+│   └── feishu.ts            # 飞书 Bot 长连接 + node:http Dashboard
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -734,7 +803,8 @@ src/
 │   ├── cache.ts             # cache on / off / status
 │   ├── memory.ts            # memory / memory search / read / forget
 │   ├── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
-│   └── plugin.ts            # /plugin list / load / unload
+│   ├── plugin.ts            # /plugin list / load / unload
+│   └── channel.ts           # /channel list
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -754,6 +824,7 @@ docs/
 ├── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
 ├── skill-system-design.md       # Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口）
 ├── plugin-system-design.md      # Plugin 系统（五个可迁移的架构决策 + PluginApi 隔离层）
+├── channel-system-design.md     # Channel 系统（三个正交扩展维度、Session + budget 隔离、Plugin 扩展点前瞻）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 
