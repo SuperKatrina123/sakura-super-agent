@@ -604,6 +604,63 @@ chunks_fts   -- 虚表：FTS5 全文倒排索引（内置 BM25 打分）
 - **保留 `when_to_use` 字段**：Claude Code 原生只有 name + description、本项目额外保留独立字段是**教学 trade-off**——"是什么/何时用"分开写、学习曲线更平
 - **shortcut handler 放最后**：`/<any>` 会匹配任何 slash 命令、放前面会抢走 `/memory` / `/dream`——顺序是真正的防线、`known` 排除列表只是兜底
 
+## 🔌 Plugin 系统
+
+> 📖 本节只是速览。完整设计（五个可迁移的架构决策、跟 Tool/Skill 的边界、错误隔离三层协同、生产 gap），见 [docs/plugin-system-design.md](docs/plugin-system-design.md)。
+
+**问题**：前面装的能力都写在项目内部——加 supabase 集成要改 `tools/`、加 slack 集成要改 `commands/`。**没有"第三方接入协议"**、生态维度封闭。
+
+**方案**：Plugin 是**带生命周期的能力包**——一个 plugin 可以注册多个工具、持有 DB 连接 / 订阅 / 定时器等长生命周期资源、有显式的 `activate` / `destroy`。
+
+### 五个可迁移的架构决策
+
+这一节最想传递的不是"给 Agent 加 plugin"、而是**所有开放扩展性的系统都会用到这五个决策**：
+
+| 决策 | 解决什么 | 业界样本 |
+|---|---|---|
+| **接口契约（PluginDefinition）** | 定义"扩展长什么样" | VS Code 扩展、Webpack plugin、Express middleware |
+| **API 隔离层（PluginApi）** | 内部实现自由演化 | `vscode` API、Webpack compiler、Chrome `chrome.*` |
+| **命名空间隔离（`pluginName__toolName`）** | 防冲突 | npm scope、K8s CRD group、Cargo crate |
+| **生命周期管理（activate / destroy）** | 防资源泄漏 | `useEffect` cleanup、K8s hooks、RAII |
+| **错误隔离** | 局部故障不扩散 | Erlang OTP、K8s Pod、Chrome multi-process |
+
+### PluginApi 是唯一通道
+
+```ts
+export interface PluginApi {
+  registerTools(tools: ToolDefinition[]): void;
+  getConfig(): PluginConfig;
+  log(message: string): void;
+}
+```
+
+Plugin 拿到的**只有** api——拿不到 `registry`、拿不到 `builder`、拿不到 `memoryStore`。**这是 VS Code 的 `vscode` API、Webpack 的 `compiler` 对象、Express 的 `app` 对象共同的 pattern**——**内部实现是流动的、API 是契约**、想加能力就在 API 上加方法、不改 plugin 接入方式。
+
+### 命名空间前缀
+
+Plugin 注册的工具会被自动加 `pluginName__` 前缀——supabase plugin 里写 `name: 'query'`、注册到 registry 里叫 `supabase__query`。**跟 MCP 的 `mcp__serverName__toolName` 语法一致**——两种能力接入方式共享同一个心智模型。
+
+### 错误隔离三层协同
+
+- **加载时**：一个 plugin activate 抛错、不影响其他 plugin 加载
+- **卸载时**：一个 plugin destroy 抛错、不阻塞其他 plugin 清理
+- **运行时**：Plugin 注册的工具跟内置工具走同一个 [读写锁](docs/tool-call-concurrency.md)、抛错不污染其他
+
+### 三个补丁
+
+- **环境变量占位** `${SUPABASE_URL}` —— plugin 声明需要的变量、部署方通过 env 提供实际值、代码里不塞 credential
+- **REPL 命令 `/plugin`** —— 列表 / load / unload、跟 skill 同 pattern
+- **Graceful shutdown** —— SIGINT 时先 `unloadAll` 再 `closeAllMCP`、顺序清晰、依赖方向明确
+
+### 内置示范：supabase plugin
+
+`src/plugins/supabase-plugin.ts` 用 3 个典型工具混搭演示：
+- `list_tables`（无参 readonly）
+- `query`（带参 readonly / **isConcurrencySafe: true**）
+- `insert`（写操作 / **isConcurrencySafe: false**——自动接入读写锁）
+
+未配 `SUPABASE_URL` 时走 mock 分支、直接可以看到 Agent 调用效果。
+
 ## 快速开始
 
 ```bash
@@ -652,6 +709,10 @@ src/
 │   └── store.ts             # 索引 + 分散 markdown 文件 + LRU 淘汰 + 24h 过期提醒
 ├── skills/
 │   └── loader.ts            # SkillLoader:frontmatter 索引 + activeSkills + progressive loading
+├── plugins/
+│   ├── types.ts             # PluginDefinition / PluginApi / PluginConfig
+│   ├── manager.ts           # PluginManager:activate/destroy 编排 + 前缀化 + env vars + 错误隔离
+│   └── supabase-plugin.ts   # 示范 plugin:list_tables / query / insert + mock 模式
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -672,7 +733,8 @@ src/
 │   ├── defense.ts           # sim / defend
 │   ├── cache.ts             # cache on / off / status
 │   ├── memory.ts            # memory / memory search / read / forget
-│   └── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
+│   ├── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
+│   └── plugin.ts            # /plugin list / load / unload
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -691,6 +753,7 @@ docs/
 ├── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
 ├── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
 ├── skill-system-design.md       # Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口）
+├── plugin-system-design.md      # Plugin 系统（五个可迁移的架构决策 + PluginApi 隔离层）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 

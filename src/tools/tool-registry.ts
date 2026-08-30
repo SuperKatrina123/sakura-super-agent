@@ -52,6 +52,11 @@ export class ToolRegistry {
         }
     }
 
+    unregister(name: string): boolean {
+        this.discoveredTools.delete(name);
+        return this.tools.delete(name);
+    }
+
     // 挂载一个 MCP server 的所有工具，加 mcp__<serverName>__ 前缀避免冲突
     // 顺序：connect → listTools → 逐个前缀化后 register
     // 每个工具的 execute 是闭包，调用时通过 JSON-RPC 转发给 server

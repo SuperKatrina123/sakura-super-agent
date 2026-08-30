@@ -29,6 +29,10 @@ import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForget
 import { skillListHandler, skillLoadHandler, skillUnloadHandler, skillShortcutHandler } from './commands/skill.ts';
 import { SkillLoader } from './skills/loader.ts';
 import { createSkillLoadTool } from './tools/skill-tools.ts';
+import { PluginManager } from './plugins/manager.ts';
+import { supabasePlugin } from './plugins/supabase-plugin.ts';
+import type { PluginDefinition } from './plugins/types.ts';
+import { createPluginCommands } from './commands/plugin.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -64,6 +68,21 @@ skillLoader.load();
 registry.register(createToolSearchTool(registry));
 registry.register(createMemoryTool(memoryStore));
 registry.register(createSkillLoadTool(skillLoader));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Plugin 系统
+// ═══════════════════════════════════════════════════════════════════════════
+// PluginManager 是 Plugin 与 Agent 内部的唯一通道——通过 PluginApi 受控暴露能力
+// 三大保证：工具名 pluginName__ 前缀防冲突、config 里 ${ENV} 占位自动解析、错误隔离
+//
+// availablePlugins：项目"注册表"——列出所有已知 plugin、REPL 里可 /plugin load 激活
+// 启动时可以选一批默认加载（比如 supabase）；也可以留空、全靠 REPL 手动激活
+const pluginManager = new PluginManager(registry);
+const availablePlugins = new Map<string, PluginDefinition>([
+  ['supabase', supabasePlugin],
+]);
+// 启动时默认加载哪些 plugin——教学演示：把 supabase 直接加载、Agent 一进 loop 就能用
+const defaultPlugins: PluginDefinition[] = [supabasePlugin];
 
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
@@ -125,6 +144,19 @@ async function main() {
   await connectMCP();
   registerSimulatedTools();
 
+  // Plugin 默认加载——错误隔离：一个失败不影响其他
+  // 每个 plugin 独立 try/catch、失败只 log、不阻塞主流程
+  console.log(`\n加载默认 Plugins (${defaultPlugins.length} 个)...`);
+  for (const def of defaultPlugins) {
+    try {
+      const tools = await pluginManager.load(def);
+      console.log(`  ✓ ${def.name} v${def.version} — 注册 ${tools.length} 个工具`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`  ✗ ${def.name} 加载失败: ${msg}`);
+    }
+  }
+
   // RAG 索引：启动时扫 docs/、chunk、embed、灌进 SQLite 三表
   // SQLite 持久化：进程退出后知识库还在、无需重新 embed
   // 用 DASHSCOPE_API_KEY 走真实 embedding、否则降级到 mock
@@ -160,8 +192,11 @@ async function main() {
     sessionId: 'default',
   });
 
-  // 应用退出前关掉所有 MCP 子进程，避免留下孤儿。SIGINT 也走同一条路径
+  // 应用退出前关掉所有 MCP 子进程 + 卸载所有 Plugin，避免留下孤儿资源
+  // Plugin 的 destroy 用于释放 DB 连接池、WebSocket、setInterval 等长生命周期资源
+  // unloadAll 内部对每个 plugin 独立 try/catch——一个 destroy 出错不影响其他
   const shutdown = async () => {
+    await pluginManager.unloadAll();
     await registry.closeAllMCP();
     process.exit(0);
   };
@@ -264,6 +299,10 @@ const dispatcher = createDispatcher([
   memoryLintHandler,   // "memory lint" / "memory lint prune" 匹配、必须在裸 memory 之前
   memoryDreamHandler,  // "dream" / "memory dream"——Agent 自主整理记忆
   memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
+  // ── Plugin 命令 ─────────────────────────────────────
+  // /plugin / /plugin list / /plugin load <name> / /plugin unload <name>
+  // handler 数组内部已按顺序排好：load / unload 先匹配、list 兜底
+  ...createPluginCommands(pluginManager, availablePlugins),
   // ── Skill 命令 ──────────────────────────────────────
   skillLoadHandler,     // "/skill load <name>" —— 必须在裸 skill 之前
   skillUnloadHandler,   // "/skill unload <name>"
