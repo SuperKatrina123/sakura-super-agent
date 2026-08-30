@@ -1,6 +1,6 @@
 # sakura-super-agent
 
-从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断），以及成本可视化（Cache 感知 + `/context` / `/usage` 快捷命令）。
+从零构建 Agent 的学习项目：把一个只会聊天的 ChatBot，一步步演化成能自主调用工具、多步推理的 **Agent Loop**，并给它装上三道"保险丝"、一套带并发控制的工具系统、可挂载真实 MCP Server、应对工具膨胀的 ToolSearch 延迟加载、跨进程续对话的 Session 持久化、模块化 SYSTEM 的 Prompt Pipe、长会话压缩的 Microcompact + Summarization、零 LLM 即时防线（Token 追踪 + TTL 修剪 + 动态截断）、成本可视化（Cache 感知 + `/context` / `/usage` 快捷命令），以及跨会话记忆（四种类型、按需注入、"记忆是线索不是事实"）。
 
 ## 从 ChatBot 到 Agent Loop
 
@@ -433,6 +433,72 @@ Usage Summary
 
 **单次调用不适合开显式 cache**（写入比不写还贵）、但 **Agent 动辄几十轮的多步对话是 cache 的最佳应用场景**。
 
+## 🧠 跨会话记忆
+
+> 📖 本节只是速览。完整设计（四种类型、YAML frontmatter + 索引、buildPromptSection 注入、生产级 gap），见 [docs/memory-system-design.md](docs/memory-system-design.md)。
+
+**问题**：Session 让"这次对话续得上"、但 **Session 结束 memory 也没了**——用户偏好、纠正反馈、决策背景、外部资源位置这些"跨会话有效"的信息丢失。
+
+**方案**：**索引 + 分散 markdown 文件**——每条 memory 是独立的 YAML frontmatter 文件、`MEMORY.md` 索引常驻。
+
+### 排除法：什么不该存
+
+**"做记忆系统最容易犯的错是什么都存"**——Mem0 报告 **33% 的记忆事实在 90 天内变得不准确**。先定义什么不该存：
+
+- ❌ **能从代码 grep 出来的**（技术栈、目录结构、函数位置）
+- ❌ **有权威来源的**（git log、CLAUDE.md、环境变量）
+- ❌ **时效性强的当前状态**（issue 编号、版本号、进度百分比）
+
+**只存"只存在于对话中、无法从其他地方获取"的信息**。
+
+### 四种记忆类型
+
+| 类型 | 语义 | 变化频率 |
+|---|---|---|
+| **user** | 用户画像（角色、偏好、背景） | 最慢——几年不变 |
+| **feedback** | 用户对 Agent 行为的**纠正 + 确认**（都要存、只存纠正会让 Agent 越来越保守） | 中——覆盖行为规则 |
+| **project** | 进行中的工作/决策/DDL（**必须绝对日期**："下周四"→"2026-05-07"） | 最快——过 DDL 就没用 |
+| **reference** | 外部资源的**位置**（不是内容快照） | 稳定——位置比内容长寿 |
+
+### "记忆是线索、不是事实"
+
+Mem0 33% 过期率是必然——**面对不可避免的过期、正确的做法不是"消灭过期"、是"提醒验证"**：
+
+- 每次注入 SYSTEM 时都提醒一句 `"记忆是线索、不是事实——使用前先验证其准确性"`
+- 超过 24h 的记忆附加 `⚠ 涉及代码行为或 file:line 引用的信息可能已经过时`
+
+### 两个硬性约束
+
+```ts
+const MAX_INDEX_LINES = 200;   // 索引最多 200 条——**强制淘汰机制**、逼 Agent 只保留高价值记忆
+const MAX_FILE_CHARS = 4000;   // 单条内容最多 4000 字符——防止一条记忆吃光 SYSTEM 预算
+```
+
+**200 不是技术限制、是设计约束**——满了必须删旧的、跟 Claude Code 一致。
+
+### 单一 `memory` 工具、五个 action
+
+**一个工具、五个 action**（save / list / search / read / delete）而不是五个独立工具——省 SYSTEM tokens、Agent 只需学一个 mental model。
+
+**工具 description 里嵌入分类规则和排除法**——Agent 每次调用时都会重新读、判断"这次值不值得存"。**这是 prompt engineering 补足模型判断力的关键**。
+
+### 每轮 rebuild SYSTEM
+
+memory 索引每轮 rebuild 注入 SYSTEM——用户在第 3 轮存的记忆、第 4 轮的 SYSTEM 自动包含。**代价**：memory 变化时 cache 前缀会 miss。但**记忆变化的频率远低于对话频率**——大部分轮次不变、整体 cache 命中率影响不大。
+
+### REPL 快捷命令
+
+```
+memory                   列出所有记忆（按 type 分组）
+memory search <query>    搜索
+memory read <name>       读取完整内容
+memory forget <name>     删除
+```
+
+**也支持 slash 前缀**：`/memory search xxx` 等价、跟 Claude Code 风格兼容。
+
+
+
 ## 快速开始
 
 ```bash
@@ -469,11 +535,14 @@ src/
 │   ├── tool-registry.ts     # 工具注册表：读写锁 + 结果截断 + MCP 挂载 + 延迟加载状态
 │   ├── index.ts             # 12 个内置工具（天气/计算/文件/bash/grep/glob/搜索/抓网页/预览）
 │   ├── tool-search.ts       # 元工具 tool_search：按名字激活延迟工具
+│   ├── memory-tools.ts      # 元工具 memory：跨会话记忆（save/list/search/read/delete）
 │   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
 ├── mcp/
 │   ├── client.ts            # 手写 stdio MCP client（教学载体）
 │   ├── sdk-client.ts        # 官方 SDK 版本（生产推荐）
 │   └── mock-client.ts       # Mock 降级实现
+├── memory/
+│   └── store.ts             # 索引 + 分散 markdown 文件 + LRU 淘汰 + 24h 过期提醒
 ├── session/
 │   ├── store.ts             # JSONL append-only 存储 + load / stats
 │   ├── tool-result-output.ts # AI SDK 5 判别联合的工具结果编解码
@@ -481,10 +550,16 @@ src/
 │   ├── compressor.ts        # 两层压缩：microcompact + summarize
 │   ├── defense.ts           # 零 LLM 三层防线：TokenTracker + truncate + TTL
 │   └── usage-tracker.ts     # Cache 可视化：四类 token 归一化 + 成本 breakdown
+├── commands/                # REPL 快捷命令 dispatcher + handler
+│   ├── index.ts             # CommandContext / CommandHandler / createDispatcher
+│   ├── view.ts              # status / context / usage
+│   ├── defense.ts           # sim / defend
+│   ├── cache.ts             # cache on / off / status
+│   └── memory.ts            # memory / memory search / read / forget
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
-    ├── segments.ts          # 4 个默认 segment
-    └── view.ts              # 上下文 / usage 可视化（/context / /usage 快捷命令）
+    ├── segments.ts          # 5 个默认 segment（含 memoryContext）
+    └── view.ts              # /context / /usage 的 ASCII 渲染
 
 docs/
 ├── agent-loop-protections.md    # 三道防护的完整实现细节
@@ -495,7 +570,8 @@ docs/
 ├── prompt-pipe-design.md        # Prompt Pipe（模块化 SYSTEM、顺序即 cache 策略）
 ├── context-compression.md      # 上下文压缩（Microcompact + Summarization 分层策略）
 ├── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
-└── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
+├── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
+└── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
 ```
 
 ## 核心设计
@@ -514,3 +590,4 @@ docs/
 - **修剪的两条铁律**：**只修剪 tool 消息**（user/assistant 永不修剪，对话结构必须完整）+ **错误经验保留**（含 error/失败/denied 等关键词的 tool_result 永不修剪，避免模型重复走死路）
 - **成本可见比省成本更重要**：`UsageTracker` 把四类 token（miss / write / read / output）分开算、`/context` 看空间、`/usage` 看成本。**看不到就没办法优化**——`saved = baseline - actual` 那一行数字比任何优化建议更能推动改进
 - **架构设计和 cache 命中率是耦合的**：每个"每轮变化"的设计决策（`sessionContext` 递增、`deferredTools` 动态过滤、`tools` 参数被 ToolSearch 修改、Summarization 重写 messages）都在扣命中率的分。教学项目实测 31% —— 生产化时必须重新审视每个动态点
+- **记忆的排除法比包含法重要**：`memory_remember` 工具的 description 里明确列出"能从代码/git/环境变量推导的不存、时效性强的不存"——**做记忆系统最容易犯的错是什么都存**（Mem0 报告 33% 记忆 90 天内过期）。四种类型（user/feedback/project/reference）通过 enum 强制归类、无法归类的信息就不该存

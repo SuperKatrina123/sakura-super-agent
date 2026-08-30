@@ -26,6 +26,7 @@ const SYMBOL = {
   systemTools:  '◐',      // 半实心——工具 schema
   mcpTools:     '◑',      // 反半实心——MCP 工具 schema
   deferred:     '◒',      // 底半实心——延迟工具目录
+  memory:       '◈',      // 菱形嵌方块——跨会话记忆
   messages:     '◉',      // 双圈实心——对话历史
   buffer:       '▢',      // 空心方块——应急缓冲
   free:         '○',      // 空心圆——空闲
@@ -36,8 +37,10 @@ const SYMBOL = {
 const BUFFER_RATIO = 0.05;
 
 // 图例的输出顺序——把有内容的往前排，free/buffer 垫底
+// memory 放在 deferred 之后、messages 之前——跟 pipe 顺序一致（memoryContext 在 deferredTools 之前？
+// 视觉上按"外部/内部"分：SYSTEM 相关 → 内容记忆 → 对话消息
 const LEGEND_ORDER: Array<keyof typeof SYMBOL> = [
-  'systemPrompt', 'systemTools', 'mcpTools', 'deferred', 'messages', 'free', 'buffer',
+  'systemPrompt', 'systemTools', 'mcpTools', 'deferred', 'memory', 'messages', 'free', 'buffer',
 ];
 
 const LEGEND_LABEL: Record<keyof typeof SYMBOL, string> = {
@@ -45,6 +48,7 @@ const LEGEND_LABEL: Record<keyof typeof SYMBOL, string> = {
   systemTools:  'System tools',
   mcpTools:     'MCP tools',
   deferred:     'Deferred tools',
+  memory:       'Memory',
   messages:     'Messages',
   buffer:       'Buffer',
   free:         'Free space',
@@ -59,6 +63,7 @@ export interface ContextSnapshot {
   systemToolsTokens: number;
   mcpToolsTokens: number;
   deferredTokens: number;
+  memoryTokens: number;         // memoryContext segment（记忆索引 + 提示）
   messagesTokens: number;
 }
 
@@ -67,12 +72,12 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
   const {
     modelDisplayName, contextWindow,
     systemPromptTokens, systemToolsTokens, mcpToolsTokens,
-    deferredTokens, messagesTokens,
+    deferredTokens, memoryTokens, messagesTokens,
   } = snapshot;
 
   const usedTokens =
     systemPromptTokens + systemToolsTokens + mcpToolsTokens +
-    deferredTokens + messagesTokens;
+    deferredTokens + memoryTokens + messagesTokens;
   const bufferTokens = Math.floor(contextWindow * BUFFER_RATIO);
   const freeTokens = Math.max(0, contextWindow - usedTokens - bufferTokens);
 
@@ -86,6 +91,7 @@ export function renderContextMatrix(snapshot: ContextSnapshot): string {
     systemTools:  Math.round(systemToolsTokens  / perCell),
     mcpTools:     Math.round(mcpToolsTokens     / perCell),
     deferred:     Math.round(deferredTokens     / perCell),
+    memory:       Math.round(memoryTokens       / perCell),
     messages:     Math.round(messagesTokens     / perCell),
     buffer:       Math.round(bufferTokens       / perCell),
     free:         0,   // free 填剩余
@@ -154,6 +160,7 @@ function tokensFor(
     case 'systemTools':  return s.systemToolsTokens;
     case 'mcpTools':     return s.mcpToolsTokens;
     case 'deferred':     return s.deferredTokens;
+    case 'memory':       return s.memoryTokens;
     case 'messages':     return s.messagesTokens;
     case 'buffer':       return bufferTokens;
     case 'free':         return freeTokens;
@@ -202,7 +209,8 @@ function charsToTokens(chars: number): number {
 export function buildSnapshot(input: {
   modelDisplayName: string;
   contextWindow: number;
-  systemPromptText: string;
+  systemPromptText: string;   // ← caller 传的 SYSTEM 里应该**不含** memory section（memory 单独算）
+  memoryText?: string;         // memoryContext segment 的输出——为空则 memoryTokens = 0
   messages: ModelMessage[];
   tools: ToolBreakdown;
 }): ContextSnapshot {
@@ -213,6 +221,7 @@ export function buildSnapshot(input: {
     systemToolsTokens:  charsToTokens(input.tools.systemToolsChars),
     mcpToolsTokens:     charsToTokens(input.tools.mcpToolsChars),
     deferredTokens:     charsToTokens(input.tools.deferredChars),
+    memoryTokens:       charsToTokens((input.memoryText ?? '').length),
     messagesTokens:     charsToTokens(countMessagesChars(input.messages)),
   };
 }

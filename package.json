@@ -15,11 +15,14 @@
     "@ai-sdk/openai": "^3.0.58",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.256",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^17.4.2",
     "jsdom": "^27.0.1",
+    "sqlite-vec": "^0.1.9",
     "turndown": "^7.2.4"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^25.6.0",
     "@types/turndown": "^5.0.6",

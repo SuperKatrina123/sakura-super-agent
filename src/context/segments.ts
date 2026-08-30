@@ -47,3 +47,15 @@ export function deferredTools(): PipeFn {
     return `以下工具可用，但需要先通过 tool_search 搜索获取完整定义：\n${lines.join('\n')}`;
   };
 }
+
+// memoryContext: 把 memory 索引注入 SYSTEM
+// - 两轮之间可能变（用户存了新记忆）、一轮内稳定
+// - 放在 coreRules / toolGuide 之后、deferredTools / sessionContext 之前
+//   保持"先静后动"原则、cache 前缀尽可能长
+// - store 未挂载时不出现（避免测试场景强制依赖）
+export function memoryContext(): PipeFn {
+  return (ctx) => {
+    if (!ctx.memoryStore) return null;
+    return ctx.memoryStore.buildPromptSection();
+  };
+}

@@ -3,6 +3,7 @@ import type { ToolRegistry } from '../tools/tool-registry.ts';
 import type { PromptBuilder, PromptContext } from '../context/prompt-builder.ts';
 import type { UsageTracker } from '../session/usage-tracker.ts';
 import type { SessionStore } from '../session/store.ts';
+import type { MemoryStore } from '../memory/store.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 快捷命令 dispatcher
@@ -28,6 +29,7 @@ export interface CommandContext {
   builder: PromptBuilder;
   tracker: UsageTracker;
   sessionStore: SessionStore;
+  memoryStore: MemoryStore;   // /context 命令要单独算 memory 字符数
   makePromptCtx: () => PromptContext;
   ask: () => void;                        // 处理完命令后重新提示输入
   // Cache 实验开关——handler 读写需要 getter/setter，直接暴露 ref 的状态桥接

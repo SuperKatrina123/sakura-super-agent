@@ -36,7 +36,7 @@ export const statusHandler: CommandHandler = (cmd, ctx) => {
 // 分类从 registry 挖：mcp__ 前缀 → MCP tools，其他 active → System tools
 export const contextHandler: CommandHandler = (cmd, ctx) => {
   if (cmd !== 'context') return false;
-  const { messages, registry, builder, modelInfo, makePromptCtx, ask } = ctx;
+  const { messages, registry, builder, modelInfo, makePromptCtx, ask, memoryStore } = ctx;
 
   let systemToolsChars = 0;
   let mcpToolsChars = 0;
@@ -54,7 +54,13 @@ export const contextHandler: CommandHandler = (cmd, ctx) => {
     return sum + t.name.length + (t.hint?.length ?? 0) + 6;
   }, 0);
 
-  const systemPromptText = builder.build(makePromptCtx());
+  // Memory section 单独算——从完整 SYSTEM 里减去，避免重复计入 System prompt
+  const memoryText = memoryStore.buildPromptSection();
+  const fullSystem = builder.build(makePromptCtx());
+  // 简单做法：把 memoryText 从 fullSystem 里去掉，剩下的是"其他 segment"
+  const systemPromptText = fullSystem.includes(memoryText)
+    ? fullSystem.replace(memoryText, '').trim()
+    : fullSystem;
 
   // 上下文窗口：DeepSeek V4 是 128k、Mock 就当 1M 演示效果
   const contextWindow = modelInfo.provider === 'mock' ? 1_000_000 : 128_000;
@@ -65,6 +71,7 @@ export const contextHandler: CommandHandler = (cmd, ctx) => {
       : `${modelInfo.provider}/${modelInfo.modelName}`,
     contextWindow,
     systemPromptText,
+    memoryText,
     messages,
     tools: { systemToolsChars, mcpToolsChars, deferredChars },
   });

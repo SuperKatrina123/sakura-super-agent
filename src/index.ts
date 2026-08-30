@@ -9,19 +9,22 @@ import { ToolRegistry } from './tools/tool-registry.ts';
 import { allTools, pickSearchTool } from './tools/index.ts';
 import { simulatedMcpTools } from './tools/simulated-mcp.ts';
 import { createToolSearchTool } from './tools/tool-search.ts';
+import { createMemoryTool } from './tools/memory-tools.ts';
+import { MemoryStore } from './memory/store.ts';
 import { agentLoop, type BudgetState } from './agent/loop';
 import { MCPClient } from './mcp/client.ts';
 import { SDKMCPClient } from './mcp/sdk-client.ts';
 import { MockMCPClient } from './mcp/mock-client.ts';
 import { SessionStore } from './session/store.ts';
 import { PromptBuilder } from './context/prompt-builder.ts';
-import { coreRules, toolGuide, sessionContext, deferredTools } from './context/segments.ts';
+import { coreRules, toolGuide, sessionContext, deferredTools, memoryContext } from './context/segments.ts';
 import { markMessageTime } from './session/defense.ts';
 import { UsageTracker } from './session/usage-tracker.ts';
 import { createDispatcher, type CommandContext } from './commands/index.ts';
 import { statusHandler, contextHandler, usageHandler } from './commands/view.ts';
 import { simHandler, defendHandler } from './commands/defense.ts';
 import { cacheOffHandler, cacheOnHandler, cacheStatusHandler } from './commands/cache.ts';
+import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForgetHandler } from './commands/memory.ts';
 
 const deepseek = createOpenAI({
     baseURL: 'https://api.deepseek.com',
@@ -39,8 +42,14 @@ const rl = createInterface({
 
 const registry = new ToolRegistry();
 registry.register(...allTools, pickSearchTool());
-// 元工具 tool_search 必须最后注册——需要闭包 registry 引用
+
+// MemoryStore：跨会话记忆——.memory/ 目录下的索引 + 分散 markdown 文件
+// 挂在项目根：跟着项目走、可 commit 到 git
+const memoryStore = new MemoryStore('.');
+
+// 两个元工具必须最后注册——都要闭包 registry / memoryStore 引用
 registry.register(createToolSearchTool(registry));
+registry.register(createMemoryTool(memoryStore));
 
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
@@ -120,6 +129,7 @@ async function main() {
     deferredTools: registry.getDeferredTools(),
     sessionMessageCount: messages.length,
     sessionId: 'default',
+    memoryStore,
   });
 
   // 应用退出前关掉所有 MCP 子进程，避免留下孤儿。SIGINT 也走同一条路径
@@ -155,6 +165,7 @@ if (isContinue && store.exists()) {
 // Session 调试信息——启动时打印一次，方便排查文件路径 / 历史膨胀 / 消息分布
 // 空会话也打（能看到"文件会写到哪"，避免下次又"找不到 jsonl"）
 printSessionDebug();
+printMemoryDebug();
 
 function printSessionDebug() {
   const s = store.stats();
@@ -172,13 +183,27 @@ function printSessionDebug() {
   console.log(`  时间跨度: ${timespan}`);
   console.log(`======================`);
 }
-// Prompt Pipe：把 SYSTEM 拆成 4 个独立 segment，每个自己决定要不要出现
+
+// Memory 调试——跟 session debug 一致的风格
+// 让"记忆存哪了、有多少条"一眼可见
+function printMemoryDebug() {
+  const s = memoryStore.stats();
+  const byType = `user × ${s.byType.user} / feedback × ${s.byType.feedback} / project × ${s.byType.project} / reference × ${s.byType.reference}`;
+  console.log(`\n=== Memory Debug ===`);
+  console.log(`  索引路径: ${s.indexPath}`);
+  console.log(`  条目总数: ${s.count}`);
+  console.log(`  分类分布: ${byType}`);
+  console.log(`=====================`);
+}
+// Prompt Pipe：把 SYSTEM 拆成 5 个独立 segment，每个自己决定要不要出现
 // 顺序即 cache 策略——越少变的越靠前，最大化 prompt cache 前缀命中
+// memory 两轮之间可能变、一轮内稳定；deferredTools 一轮内会变（tool_search 激活）——所以 memory 排在 defer 之前
 const promptBuilder = new PromptBuilder()
   .pipe('coreRules', coreRules())            // 永远不变——cache 稳稳命中
   .pipe('toolGuide', toolGuide())            // 工具数量基本固定，变化很少
-  .pipe('deferredTools', deferredTools())    // 所有工具列表基本固定，放中间
-  .pipe('sessionContext', sessionContext()); // 每次启动都不同（历史消息数），放最后
+  .pipe('memoryContext', memoryContext())    // 两轮之间可能变、一轮内稳定
+  .pipe('deferredTools', deferredTools())    // 一轮内可能变（tool_search 激活）
+  .pipe('sessionContext', sessionContext()); // 每轮变（messageCount）——最后
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
 const budget: BudgetState = { used: 0, limit: 600000 };
 
@@ -195,10 +220,13 @@ const modelInfo = process.env.DEEPSEEK_API_KEY
   : { provider: 'mock', modelName: 'mock-model' };
 // 快捷命令 dispatcher——handler 按数组顺序尝试匹配
 // 注意：cache off / cache on 必须在裸 cache 之前（前者是更长的精确匹配）
+// 同理：memory search / read / forget 必须在裸 memory 之前
 const dispatcher = createDispatcher([
   statusHandler, contextHandler, usageHandler,
   simHandler, defendHandler,
   cacheOffHandler, cacheOnHandler, cacheStatusHandler,
+  memorySearchHandler, memoryReadHandler, memoryForgetHandler,
+  memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
 ]);
 
 
@@ -217,6 +245,7 @@ function ask() {
             deferredTools: registry.getDeferredTools(),
             sessionMessageCount: messages.length,
             sessionId: 'default',
+            memoryStore,   // memoryContext segment 用它 buildPromptSection()
         });
         const cmdCtx: CommandContext = {
             messages,
@@ -224,6 +253,7 @@ function ask() {
             builder: promptBuilder,
             tracker: usageTracker,
             sessionStore: store,
+            memoryStore,
             makePromptCtx,
             ask,
             cacheState,
@@ -240,12 +270,13 @@ function ask() {
         markMessageTime(userMsg);   // 打时间戳，让 TTL 修剪能识别新旧
 
         // 每轮都重建 PromptContext——registry/messages 都可能变
-        // pipe.build 里 4 个 segment 各自决定要不要出现，最终拼成 SYSTEM
+        // pipe.build 里 5 个 segment 各自决定要不要出现，最终拼成 SYSTEM
         const promptCtx = {
             toolCount: registry.getAll().length,
             deferredTools: registry.getDeferredTools(),
             sessionMessageCount: messages.length - 1,   // 减去刚 push 的这条 user，反映"历史"
             sessionId: 'default',
+            memoryStore,   // memoryContext segment 用它 buildPromptSection()
         };
         const dynamicSystem = promptBuilder.build(promptCtx);
         await agentLoop(model, registry, messages, dynamicSystem, budget, {
