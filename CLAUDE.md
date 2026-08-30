@@ -87,6 +87,7 @@ try {
 - [docs/instant-defenses.md](docs/instant-defenses.md) — 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
 - [docs/cost-visualization.md](docs/cost-visualization.md) — 成本可视化（Cache 三种模式 / `/context` / `/usage` / 31% 命中率的架构分析）
 - [docs/memory-system-design.md](docs/memory-system-design.md) — 跨会话记忆（四种类型、YAML frontmatter + 索引、"记忆是线索不是事实"）
+- [docs/skill-system-design.md](docs/skill-system-design.md) — Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口、async dispatcher）
 - [docs/rag-system-design.md](docs/rag-system-design.md) — RAG 系统（六步管线、混合检索 7:3 加权、MMR 去重、SQLite 三表架构）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线

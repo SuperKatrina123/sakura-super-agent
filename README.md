@@ -559,6 +559,51 @@ chunks_fts   -- 虚表：FTS5 全文倒排索引（内置 BM25 打分）
 
 实测：Agent 主动用 `rag_search` 找到相关文档、再用 `read_file` 读全文——**RAG 是"发现工具"、read_file 是"精读工具"**、Agent 自己判断分工、无需 prompt 教。
 
+## 🎯 Skill 工作流系统
+
+> 📖 本节只是速览。完整设计（渐进式加载三层、元工具 vs 快捷命令双入口、when_to_use 教学 trade-off、async dispatcher），见 [docs/skill-system-design.md](docs/skill-system-design.md)。
+
+**问题**：用户每次让 Agent"code review"、都要把 SOP 重讲一遍（"先看 diff、再逐文件检查、按模板输出"）。**同样的 SOP 换个说法、Agent 执行流程就漂**——组织资产没沉淀。
+
+**方案**：把工作流写成 markdown、放 `.skills/<name>/SKILL.md`——**跟 memory / rag 同一套渐进式加载模式**：
+
+```
+.skills/
+├── code-review/
+│   ├── SKILL.md          ← YAML frontmatter + body
+│   └── checklist.md      ← 可选辅助文件
+└── commit/
+    └── SKILL.md
+```
+
+### 三层加载
+
+- **Level 1（启动）**：只解析 frontmatter—— `name` + `description` + `when_to_use`、约 100 tokens/skill
+- **Level 2（激活）**：完整 body 进 SYSTEM——`[激活的 Skill: name]` 标记 + 完整 SOP
+- **Level 3（按需）**：辅助文件用 `read_file` 打开——**skill 的辅助文件就是普通文件、复用现有工具、不需要额外抽象**
+
+### 两种激活入口
+
+**元工具 `skill_load(name)`**——让 Agent 自主激活。SYSTEM 里有"可用 Skills"列表、Agent 看到任务匹配某个 `when_to_use` 就直接调、无需人工介入。
+
+**REPL 快捷命令**——让用户直接控制：
+
+```
+/skill                    列出所有 skill（含激活状态）
+/skill load code-review   激活
+/skill unload code-review 卸载
+/code-review              **一键激活 + 立刻按 SOP 执行**
+/code-review 顺便看 PR    同上、附带额外说明
+```
+
+`/<skill-name>` 是最"甜"的入口——**激活的同时把 skill body 作为 user message 注入、Agent 拿到 SOP 立刻开跑**、不用等下一轮。这个改动顺便把 dispatcher 变成 async——为 dream / skill / 未来所有"能触发 loop 的命令"都铺好了路。
+
+### 关键设计取舍
+
+- **strict mode**：frontmatter 缺 description 直接 skip——逼作者写清元数据
+- **保留 `when_to_use` 字段**：Claude Code 原生只有 name + description、本项目额外保留独立字段是**教学 trade-off**——"是什么/何时用"分开写、学习曲线更平
+- **shortcut handler 放最后**：`/<any>` 会匹配任何 slash 命令、放前面会抢走 `/memory` / `/dream`——顺序是真正的防线、`known` 排除列表只是兜底
+
 ## 快速开始
 
 ```bash
@@ -596,6 +641,7 @@ src/
 │   ├── index.ts             # 12 个内置工具（天气/计算/文件/bash/grep/glob/搜索/抓网页/预览）
 │   ├── tool-search.ts       # 元工具 tool_search：按名字激活延迟工具
 │   ├── memory-tools.ts      # 元工具 memory:跨会话记忆（save/list/search/read/delete）
+│   ├── skill-tools.ts       # 元工具 skill_load:激活 skill、下轮 SYSTEM 注入完整 body
 │   ├── rag-tools.ts         # 元工具 rag_search：SQLite 三表混合检索
 │   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
 ├── mcp/
@@ -604,6 +650,8 @@ src/
 │   └── mock-client.ts       # Mock 降级实现
 ├── memory/
 │   └── store.ts             # 索引 + 分散 markdown 文件 + LRU 淘汰 + 24h 过期提醒
+├── skills/
+│   └── loader.ts            # SkillLoader:frontmatter 索引 + activeSkills + progressive loading
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -623,11 +671,12 @@ src/
 │   ├── view.ts              # status / context / usage
 │   ├── defense.ts           # sim / defend
 │   ├── cache.ts             # cache on / off / status
-│   └── memory.ts            # memory / memory search / read / forget
+│   ├── memory.ts            # memory / memory search / read / forget
+│   └── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
-    ├── prompt-pipes.ts      # 依赖运行时组件的 pipe（memoryContext / ragContext）
+    ├── prompt-pipes.ts      # 依赖运行时组件的 pipe（memoryContext / skillsContext / ragContext）
     └── view.ts              # /context / /usage 的 ASCII 渲染
 
 docs/
@@ -641,6 +690,7 @@ docs/
 ├── instant-defenses.md          # 零 LLM 防线（TokenTracker + TTL + Truncate 三层协同）
 ├── cost-visualization.md        # 成本可视化（Cache 三模式 + /context + /usage + 31% 命中率分析）
 ├── memory-system-design.md      # 跨会话记忆（四种类型、索引 + markdown、"记忆是线索"）
+├── skill-system-design.md       # Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 

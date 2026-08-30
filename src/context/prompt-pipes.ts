@@ -1,5 +1,6 @@
 import type { MemoryStore } from '../memory/store.ts';
 import type { SqliteVectorStore } from '../rag/sqlite-store.ts';
+import type { SkillLoader } from '../skills/loader.ts';
 import type { PromptContext } from './prompt-builder.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -38,4 +39,15 @@ export function ragContext(getStore: () => SqliteVectorStore | null): PipeFn {
     return `[知识库] 已索引 ${sources.length} 个文档、共 ${size} 个片段。用 rag_search 工具按语义搜索。
 可用文档：${sources.join('、')}`;
   };
+}
+
+// skillsContext: 把 skill 索引 + 激活的 body 注入 SYSTEM
+// 渐进式加载三层：
+//   未激活 → 只显示 name + description（+ when_to_use 如果有）
+//   激活   → 完整 body 注入、Agent 一进 loop 就看到详细指令
+// **不注入 = SYSTEM 里没有 [激活的 Skill] 标记 = Agent 需要主动 skill_load**
+//
+// 空 skill 时不出现——避免"可用 Skills: 无"这种噪音
+export function skillsContext(loader: SkillLoader): PipeFn {
+  return () => loader.buildPromptSection();
 }

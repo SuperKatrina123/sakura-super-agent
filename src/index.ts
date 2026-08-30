@@ -18,7 +18,7 @@ import { MockMCPClient } from './mcp/mock-client.ts';
 import { SessionStore } from './session/store.ts';
 import { PromptBuilder } from './context/prompt-builder.ts';
 import { coreRules, toolGuide, sessionContext, deferredTools } from './context/segments.ts';
-import { memoryContext, ragContext } from './context/prompt-pipes.ts';
+import { memoryContext, ragContext, skillsContext } from './context/prompt-pipes.ts';
 import { markMessageTime } from './session/defense.ts';
 import { UsageTracker } from './session/usage-tracker.ts';
 import { createDispatcher, type CommandContext } from './commands/index.ts';
@@ -26,6 +26,9 @@ import { statusHandler, contextHandler, usageHandler } from './commands/view.ts'
 import { simHandler, defendHandler } from './commands/defense.ts';
 import { cacheOffHandler, cacheOnHandler, cacheStatusHandler } from './commands/cache.ts';
 import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForgetHandler, memoryLintHandler, memoryDreamHandler } from './commands/memory.ts';
+import { skillListHandler, skillLoadHandler, skillUnloadHandler, skillShortcutHandler } from './commands/skill.ts';
+import { SkillLoader } from './skills/loader.ts';
+import { createSkillLoadTool } from './tools/skill-tools.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -52,9 +55,15 @@ registry.register(...allTools, pickSearchTool());
 // 挂在项目根：跟着项目走、可 commit 到 git
 const memoryStore = new MemoryStore('.');
 
-// 两个元工具必须最后注册——都要闭包 registry / memoryStore 引用
+// SkillLoader：.skills/ 目录下的可复用工作流——用 markdown 定义、渐进式加载
+// 启动时扫全部 SKILL.md、解析 frontmatter 元数据；body 只在激活后进 SYSTEM
+const skillLoader = new SkillLoader('.');
+skillLoader.load();
+
+// 元工具最后注册——都要闭包运行时组件引用
 registry.register(createToolSearchTool(registry));
 registry.register(createMemoryTool(memoryStore));
+registry.register(createSkillLoadTool(skillLoader));
 
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
@@ -226,6 +235,7 @@ const promptBuilder = new PromptBuilder()
   .pipe('coreRules', coreRules())                     // 永远不变——cache 稳稳命中
   .pipe('toolGuide', toolGuide())                     // 工具数量基本固定，变化很少
   .pipe('memoryContext', memoryContext(memoryStore))  // 两轮之间可能变、一轮内稳定
+  .pipe('skillsContext', skillsContext(skillLoader))  // skill 索引 + 激活的 body
   .pipe('ragContext', ragContext(() => ragStoreRef.store))  // 知识库声明——启动后一轮内不变
   .pipe('deferredTools', deferredTools())             // 一轮内可能变（tool_search 激活）
   .pipe('sessionContext', sessionContext());          // 每轮变（messageCount）——最后
@@ -254,6 +264,11 @@ const dispatcher = createDispatcher([
   memoryLintHandler,   // "memory lint" / "memory lint prune" 匹配、必须在裸 memory 之前
   memoryDreamHandler,  // "dream" / "memory dream"——Agent 自主整理记忆
   memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
+  // ── Skill 命令 ──────────────────────────────────────
+  skillLoadHandler,     // "/skill load <name>" —— 必须在裸 skill 之前
+  skillUnloadHandler,   // "/skill unload <name>"
+  skillListHandler,     // "/skill" / "/skill list"
+  skillShortcutHandler, // "/<skill-name>" —— **必须放最后**，会尝试匹配任何 slash 命令
 ]);
 
 
@@ -280,6 +295,7 @@ function ask() {
             tracker: usageTracker,
             sessionStore: store,
             memoryStore,
+            skillLoader,
             makePromptCtx,
             ask,
             cacheState,

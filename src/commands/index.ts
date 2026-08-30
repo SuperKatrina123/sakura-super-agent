@@ -4,6 +4,7 @@ import type { PromptBuilder, PromptContext } from '../context/prompt-builder.ts'
 import type { UsageTracker } from '../session/usage-tracker.ts';
 import type { SessionStore } from '../session/store.ts';
 import type { MemoryStore } from '../memory/store.ts';
+import type { SkillLoader } from '../skills/loader.ts';
 import type { BudgetState } from '../agent/loop.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -32,6 +33,7 @@ export interface CommandContext {
   tracker: UsageTracker;
   sessionStore: SessionStore;
   memoryStore: MemoryStore;
+  skillLoader: SkillLoader;
   makePromptCtx: () => PromptContext;
   ask: () => void;                        // 处理完命令后重新提示输入
   cacheState: { disabled: boolean };
