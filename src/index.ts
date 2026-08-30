@@ -26,7 +26,8 @@ import { statusHandler, contextHandler, usageHandler } from './commands/view.ts'
 import { simHandler, defendHandler } from './commands/defense.ts';
 import { cacheOffHandler, cacheOnHandler, cacheStatusHandler } from './commands/cache.ts';
 import { memoryListHandler, memorySearchHandler, memoryReadHandler, memoryForgetHandler } from './commands/memory.ts';
-import { buildIndex } from './rag/index.ts';
+import { buildSqliteIndex } from './rag/build-sqlite.ts';
+import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
 import { createRagSearchTool } from './tools/rag-tools.ts';
 
@@ -115,19 +116,20 @@ async function main() {
   await connectMCP();
   registerSimulatedTools();
 
-  // RAG 索引：启动时扫 docs/、chunk、embed（增量、有缓存就跳过已 embed 的）
+  // RAG 索引：启动时扫 docs/、chunk、embed、灌进 SQLite 三表
+  // SQLite 持久化：进程退出后知识库还在、无需重新 embed
   // 用 DASHSCOPE_API_KEY 走真实 embedding、否则降级到 mock
   const provider = process.env.DASHSCOPE_API_KEY ? 'dashscope' : 'mock';
-  const indexed = await buildIndex({ docsDir: 'docs', provider });
-  // 填充顶层 ragChunks ref——让 ragContext pipe 拿到实际数据
-  ragChunks.push(...indexed);
+  const store = await buildSqliteIndex({ docsDir: 'docs', provider });
+  // 把 store 塞进 ragStoreRef——让 pipe 拿到 store 引用
+  ragStoreRef.store = store;
 
   // 挂 rag_search 工具——Agent 通过它检索项目文档知识库
   // 用同一个 embedder：query 必须跟 chunks 用同一 provider 才能 cosine 匹配
   const ragEmbedder = provider === 'dashscope' && process.env.DASHSCOPE_API_KEY
     ? createDashScopeEmbedder(process.env.DASHSCOPE_API_KEY)
     : createMockEmbedder();
-  registry.register(createRagSearchTool(ragChunks, ragEmbedder));
+  registry.register(createRagSearchTool(store, ragEmbedder));
 
   const allCount = registry.getAll().length;
   const activeTools = registry.getActiveTools();
@@ -216,15 +218,15 @@ function printMemoryDebug() {
 // 顺序即 cache 策略——越少变的越靠前，最大化 prompt cache 前缀命中
 // memory / rag 两轮之间可能变、一轮内稳定；deferredTools 一轮内会变（tool_search 激活）
 //
-// ragChunks 用 mutable ref：pipe 在顶层声明、但 chunks 要等 main() 里 buildIndex 完才有
-// 通过闭包读一个 mutable 数组、main() 里 push 进来——避免"pipe 声明依赖异步初始化"的顺序问题
-const ragChunks: import('./rag/index.ts').EmbeddedChunk[] = [];
+// ragStoreRef：pipe 顶层声明时 store 还没建（要等 main() 里 buildSqliteIndex）
+// 用 mutable ref + getter 让 pipe 延后拿到 store 实例——避免"pipe 声明依赖异步初始化"
+const ragStoreRef: { store: SqliteVectorStore | null } = { store: null };
 
 const promptBuilder = new PromptBuilder()
   .pipe('coreRules', coreRules())                     // 永远不变——cache 稳稳命中
   .pipe('toolGuide', toolGuide())                     // 工具数量基本固定，变化很少
   .pipe('memoryContext', memoryContext(memoryStore))  // 两轮之间可能变、一轮内稳定
-  .pipe('ragContext', ragContext(ragChunks))          // 知识库声明——启动后一轮内不变
+  .pipe('ragContext', ragContext(() => ragStoreRef.store))  // 知识库声明——启动后一轮内不变
   .pipe('deferredTools', deferredTools())             // 一轮内可能变（tool_search 激活）
   .pipe('sessionContext', sessionContext());          // 每轮变（messageCount）——最后
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它

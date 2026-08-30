@@ -1,22 +1,19 @@
 import type { ToolDefinition } from './tool-registry.ts';
-import type { EmbeddedChunk } from '../rag/index.ts';
 import type { EmbeddingFn } from '../rag/embedder.ts';
-import { hybridSearch } from '../rag/search.ts';
+import type { SqliteVectorStore } from '../rag/sqlite-store.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// createRagSearchTool：把 RAG 检索暴露为一个工具、Agent 需要时主动调
+// createRagSearchTool：把 SQLite 三表 RAG 检索暴露为一个工具
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// v1 决策：
-//   - **只做 rag_search、不做 rag_ingest**——写入靠启动时自动扫 docs/
-//     Agent 只查、不改索引——职责清晰、避免"内存 chunks 跟磁盘不同步"的复杂度
-//   - **chunks 传引用**——假设启动后不变。v2 做 rag_ingest 时改成 getAllChunks(): () => Chunk[]
-//   - **参数是 chunks + embedFn**——跟 hybridSearch 的签名对齐、不引入 VectorStore 抽象层
+// 参数从 EmbeddedChunk[] 升级为 SqliteVectorStore——获得两个能力：
+//   1. **持久化**：进程重启后知识库还在、无需重新 embed
+//   2. **快速检索**：sqlite-vec 用 HNSW 索引、FTS5 用倒排索引、比内存 O(n) 快很多
 //
-// description 里明确"何时调、返回什么"——让 Agent 判断"这个问题该查文档吗"
+// description 里说明何时该调、返回什么
 
 export function createRagSearchTool(
-  chunks: EmbeddedChunk[],
+  store: SqliteVectorStore,
   embedder: EmbeddingFn,
 ): ToolDefinition {
   return {
@@ -32,7 +29,7 @@ export function createRagSearchTool(
   - 用户问"当前代码里 XX 函数在哪"——用 grep / read_file 更准
   - 用户问"最新的 issue 有哪些"——用 web_search 或 MCP 工具
 
-返回：top-K 相关文档片段、包含 source（文件路径）+ score（0-1 融合分）+ text 内容摘要`,
+返回：top-K 相关文档片段、包含 source（文件路径）+ score（0-1 融合分）+ text 内容`,
     parameters: {
       type: 'object',
       properties: {
@@ -51,24 +48,21 @@ export function createRagSearchTool(
     isConcurrencySafe: true,
     isReadOnly: true,
     execute: async ({ query, top_k }: { query: string; top_k?: number }) => {
-      if (chunks.length === 0) {
+      if (store.size() === 0) {
         return '知识库为空——启动时没索引到任何文档';
       }
       const k = Math.min(top_k ?? 5, 10);
-      const results = await hybridSearch(chunks, embedder, query, k);
+      // hybridSearch 内部做了：向量 top-K×4 + 关键词 top-K×4 → min-max 归一 → 加权融合 → MMR 去重
+      const results = await store.hybridSearch(embedder, query, k);
       if (results.length === 0) {
         return `没有找到跟 "${query}" 相关的文档片段`;
       }
 
-      // 每条结果：来源 + 分数（融合/向量/关键词）+ 文本预览
-      // 保留 500 字符预览——够 Agent 判断"这条相关吗、要不要 read 完整内容"
       return results.map((r, i) => {
-        const preview = r.chunk.text.length > 500
-          ? r.chunk.text.slice(0, 500) + '\n... [truncated]'
-          : r.chunk.text;
+        // 完整返回 chunk 内容——chunk 已经是"合适大小的语义单元"（~256 tokens）、无需截断
         return [
           `[${i + 1}] ${r.chunk.source} · score=${r.score.toFixed(3)} (vec=${r.vectorScore.toFixed(2)} kw=${r.keywordScore.toFixed(2)})`,
-          preview,
+          r.chunk.text,
         ].join('\n');
       }).join('\n\n---\n\n');
     },
