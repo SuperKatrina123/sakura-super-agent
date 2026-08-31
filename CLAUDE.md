@@ -93,6 +93,7 @@ try {
 - [docs/security-design.md](docs/security-design.md) — 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
 - [docs/cron-system-design.md](docs/cron-system-design.md) — Cron 系统（主动 vs 被动的第四维度、四个架构决策、Agent 从"客服"到"助手"的分水岭）
 - [docs/subagent-system-design.md](docs/subagent-system-design.md) — SubAgent 系统（隔离本质、六个执行设计点、结果回传三种做法、description 就是 mini-prompt）
+- [docs/config-system-design.md](docs/config-system-design.md) — 配置系统（Zod 四合一 / ${VAR} 替换 / enabled 开关 / interactive init / 入口分层）
 - [docs/rag-system-design.md](docs/rag-system-design.md) — RAG 系统（六步管线、混合检索 7:3 加权、MMR 去重、SQLite 三表架构）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线

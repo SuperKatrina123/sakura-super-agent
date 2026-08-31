@@ -929,6 +929,91 @@ maxConcurrent: 3      // 并发限制、防水平爆炸（一层无限宽）
 
 前面所有系统都在打造"一个更强的 Agent"——**subAgent 让 Agent 从助手变成了"能带团队的团队 leader"**。
 
+## ⚙️ 配置系统
+
+> 📖 本节只是速览。完整设计（三步管线、Zod 唯一事实源、enabled 开关的哲学、interactive init、入口分层），见 [docs/config-system-design.md](docs/config-system-design.md)。
+
+**问题**：前面十几章的 index.ts 里、硬编码到处都是——模型名 / 飞书端口 / subAgent 参数 / 插件列表 / cron 目录——**每改一处都要动代码、重新部署**。
+
+**方案**：所有可调参数集中到 `super-agent.config.json`、Zod 校验 + 环境变量替换 + 默认值合并。
+
+### 三步管线：读 → 替换 → 校验
+
+```ts
+// src/config/loader.ts
+export function loadConfig() {
+  const raw = JSON.parse(fs.readFileSync(path));       // ① 读 JSON
+  const substituted = substituteEnvVars(raw);          // ② 替换 ${ENV_VAR}
+  const result = SuperAgentConfigSchema.safeParse(substituted);  // ③ Zod 校验 + 默认值合并
+  // ...
+}
+```
+
+**顺序很重要**——**校验必须发生在数据变形之后**、不然只是校验中间态。
+
+### Zod schema：一份 schema、四个用途
+
+```ts
+export const FeishuChannelConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  appId: z.string().default(''),
+  appSecret: z.string().default(''),
+  port: z.number().default(3000),
+});
+export type SuperAgentConfig = z.infer<typeof SuperAgentConfigSchema>;
+```
+
+**类型 / 校验 / 默认值 / TypeScript 类型推导四合一**——schema 是唯一事实源、永远不漂移。
+
+### 环境变量替换：`${VAR}` 语法
+
+配置里写 `"apiKey": "${DASHSCOPE_API_KEY}"`——运行时自动替换。**只匹配大写字母 + 下划线** `[A-Z_][A-Z0-9_]*`（OpenClaw 也在用的约定）、避免误替换正常文本中的 `${}` 模式。
+
+**敏感信息不进代码库、也不进 config 文件**——只在 `.env` 或系统环境。
+
+### enabled 开关：关了就完全不初始化
+
+```ts
+// 旧代码：不管用不用都创建 FeishuChannel 实例、占 3000 端口
+const feishuChannel = new FeishuChannel({ ... });
+gateway.register(feishuChannel);
+
+// 新代码：完全跳过初始化
+if (config.channels.feishu.enabled) {
+  const feishuChannel = new FeishuChannel({ ... });
+  gateway.register(feishuChannel);
+}
+```
+
+**"关闭"= "不存在"**、不是"存在但不用"——机器上没幽灵进程、没闲置端口。cron / rag / audit hook / plugin 全上了这个开关。
+
+### Interactive Init 向导
+
+```bash
+pnpm init
+```
+
+交互式引导用户走完关键配置——**别让用户手写 JSON**：
+- 模型预设候选（1/2/3 选一个、避免拼写错误）
+- 默认值中括号提示（回车 = 默认）
+- 顺带生成 `.env`——用户填了 API key 自动写、不用手动创建
+
+### 入口分层：router / main / init
+
+```
+src/index.ts   ← 8 行、只做路由（init / start）
+    ├── src/config/init.ts   ← 交互式向导
+    └── src/main.ts          ← startAgent() 主入口、按 config 初始化所有子系统
+```
+
+**动态 import 延迟加载**——`pnpm init` 时不会加载 main.ts、也不会走 ToolRegistry / MCP / RAG 初始化、**跑 init 快得多**。
+
+### 配置化是最后一公里
+
+**这是项目最后一个改造**——**从"演示原型"到"可交付产品"的分水岭**。
+
+前面所有能力都在**加东西**、配置化是**让所有能力可运维**——能改、能关、非开发者能用。"能不能配置"是"内部工具"和"可交付产品"的界线。
+
 ## 快速开始
 
 ```bash
@@ -955,7 +1040,8 @@ npm start        # 直接运行
 
 ```
 src/
-├── index.ts                 # 入口：readline REPL，持有 messages 与 budget，挂 MCP + 元工具 + Pipe
+├── index.ts                 # CLI 路由（8 行）:根据 argv[2] 决定跑 init 向导还是 startAgent
+├── main.ts                  # startAgent() 主入口:按 config 初始化所有子系统
 ├── agent/
 │   └── loop.ts              # Agent Loop：while 循环 + 步骤级重试 + 防护接入
 ├── loop-detection.ts        # 循环检测：指纹 + 滑动窗口 + 三个检测器
@@ -1000,6 +1086,11 @@ src/
 │   ├── types.ts             # SubAgentConfig / SpawnRequest / SubAgentRun
 │   ├── registry.ts          # SubAgentRegistry: canSpawn + 状态跟踪 + maxSpawnDepth/maxConcurrent
 │   └── spawn.ts             # spawnAgent / spawnParallel: 独立 messages + 独立 loop + 彩色 tag + 超时兜底
+├── config/
+│   ├── schema.ts            # Zod schema —— 类型/校验/默认值/TS 推导 四合一
+│   ├── loader.ts            # loadConfig: 读 JSON → 替换 ${ENV_VAR} → Zod 校验 + 默认值合并
+│   ├── init.ts              # 交互式向导 runInit()
+│   └── env-interpolation.ts # 递归替换 ${VAR}（Plugin 系统可复用）
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -1050,6 +1141,7 @@ docs/
 ├── security-design.md           # 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
 ├── cron-system-design.md        # Cron 系统（主动 vs 被动的第四维度、四个架构决策、Agent 从"客服"到"助手"的分水岭）
 ├── subagent-system-design.md    # SubAgent 系统（隔离本质 / 六个执行设计点 / 结果回传三种做法 / description 就是 mini-prompt）
+├── config-system-design.md      # 配置系统（Zod 四合一 / ${VAR} 替换 / enabled 开关 / interactive init / 入口分层）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 
