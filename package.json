@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "init": "tsx src/index.ts init"
+    "init": "tsx src/index.ts init",
+    "trace:inspect": "tsx src/trace/inspect.ts"
   },
   "keywords": [],
   "author": "",

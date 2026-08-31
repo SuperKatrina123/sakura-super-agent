@@ -1014,6 +1014,78 @@ src/index.ts   ← 8 行、只做路由（init / start）
 
 前面所有能力都在**加东西**、配置化是**让所有能力可运维**——能改、能关、非开发者能用。"能不能配置"是"内部工具"和"可交付产品"的界线。
 
+## 🔍 Trace 系统
+
+> 📖 本节只是速览。完整设计（跟 Session 的边界、"输入上下文快照"为什么是核心、5 种事件类型的取舍、双入口 REPL + CLI 复用 inspectTrace），见 [docs/trace-system-design.md](docs/trace-system-design.md)。
+
+**问题**：能力越强、出错时越难查——**Step 4 的回答错了、真正原因是什么？**普通日志只能告诉你"发生了什么"、答不了**"当时 Agent 是在什么信息条件下做的决定"**。
+
+**方案**：一次 agentLoop 一个 JSONL trace 文件、记录**每 Step 的完整输入上下文快照 + 输出 + usage + 耗时 + 错误**。
+
+### Trace ≠ Session
+
+两者都存 `.jsonl`、**但服务对象完全不同**：
+
+| 对比 | Session | Trace |
+|---|---|---|
+| 服务对象 | 用户继续对话 | 开发者排查复盘 |
+| 核心内容 | user/assistant/tool 消息 | 每 Step 的**输入 + 输出 + 耗时 + usage + 错误** |
+| 组织方式 | 一个会话持续追加 | 一次任务一个文件 |
+| 生命周期 | 长期存在 | 按天数清理 |
+
+### 最容易漏的字段：Step 开始前的上下文快照
+
+**只保存模型输出不够**——`applyDefense` / `microcompact` / `summarize` 在每 step 前都会隐性修改 messages。**Step 4 看到的 messages ≠ Step 1 看到的**——**必须记 Step 前的最终版本**、才能查出"当时它是在什么信息条件下做的决定"。
+
+### 5 种事件类型
+
+```ts
+trace_started       // 任务开始（sessionId + model）
+step_started        // 模型调用前:完整 SYSTEM + 完整 messages 快照
+step_attempt_failed // 每次重试失败:step + attempt + error
+step_completed      // 模型调用后:output + usage + durationMs
+trace_finished      // 任务结束:status + 总耗时
+```
+
+**刻意保持最小**——tool call/result 已经在 `step_completed.output.messages` 里、不单独记。
+
+### 四个 Recorder 细节
+
+- **敏感字段 REDACT** —— 递归匹配 `apiKey|token|secret|password|authorization`、自动脱敏
+- **写盘失败静默降级** —— `writeFailed` flag、失败一次就停记、不淹主流程
+- **append-only JSONL** —— 跟 Session/Cron 一致、崩溃安全 + 流式友好
+- **stepStartedAt Map 内部记账** —— start 记时间、complete 时算 durationMs、不依赖 emitter
+
+### agentLoop 里两处 emit
+
+```ts
+if (trace && attempt === 1) await trace.recordStepStarted(...);  // 只 attempt=1 emit
+// ... streamText ...
+if (trace) await trace.recordAttemptError(...);                  // 每次重试失败
+// ... token 计费 ...
+if (trace) await trace.recordStepCompleted(...);                 // 拿到 usage 之后
+```
+
+**可选 opt-in** —— `trace` 是 `opts?.trace`、不传零开销。
+
+### 双入口:REPL /trace + CLI inspect
+
+同一份摘要逻辑（`inspectTrace()` 纯函数）、两个入口复用：
+
+```
+/trace              REPL:列出最近 10 个
+/trace show <id>    REPL:完整时间线摘要 ← 调 inspectTrace
+/trace path <id>    REPL:只打关键路径（跳过 messages 细节）
+
+pnpm trace:inspect .traces/xxx.jsonl  # CLI:独立入口、跟脚本组合方便
+```
+
+**"给人看的摘要"是必要的** —— 原文 cat 也能看、但每行都是 JSON、几百字节的 messages 塞一行不可读。**摘要提供骨架视角、想看细节再去看原文**。
+
+### Trace 的核心价值是"能重现"
+
+**做的时候麻烦一点、出事的时候救命一次就够本了**——**"能不能重现"是"排障工具好不好用"的分水岭**。
+
 ## 快速开始
 
 ```bash
@@ -1091,6 +1163,9 @@ src/
 │   ├── loader.ts            # loadConfig: 读 JSON → 替换 ${ENV_VAR} → Zod 校验 + 默认值合并
 │   ├── init.ts              # 交互式向导 runInit()
 │   └── env-interpolation.ts # 递归替换 ${VAR}（Plugin 系统可复用）
+├── trace/
+│   ├── recorder.ts          # LocalTraceRecorder:5 种事件 + sanitize + append-only + inspectTrace
+│   └── inspect.ts           # CLI 独立入口:`pnpm trace:inspect <path>`
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -1117,7 +1192,8 @@ src/
 │   ├── security.ts          # /role list|owner|collaborator|guest、/hooks 查看当前 pre/post 钩子
 │   ├── cron.ts              # /cron / /cron logs 查看定时任务与最近执行记录
 │   ├── agent.ts             # /agents 查看子 Agent 运行记录（活跃/完成/失败 + 配置）
-│   └── test-spawn.ts        # /test-spawn 直调 spawnParallel、跳过模型选择的不确定性
+│   ├── test-spawn.ts        # /test-spawn 直调 spawnParallel、跳过模型选择的不确定性
+│   └── trace.ts             # /trace list / show / path 查看 trace 摘要
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -1142,6 +1218,7 @@ docs/
 ├── cron-system-design.md        # Cron 系统（主动 vs 被动的第四维度、四个架构决策、Agent 从"客服"到"助手"的分水岭）
 ├── subagent-system-design.md    # SubAgent 系统（隔离本质 / 六个执行设计点 / 结果回传三种做法 / description 就是 mini-prompt）
 ├── config-system-design.md      # 配置系统（Zod 四合一 / ${VAR} 替换 / enabled 开关 / interactive init / 入口分层）
+├── trace-system-design.md       # Trace 系统（跟 Session 的边界 / 输入上下文快照 / 5 种事件 / REPL + CLI 双入口）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 

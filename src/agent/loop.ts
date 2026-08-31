@@ -5,6 +5,7 @@ import { UsageTracker, normalizeUsage } from '../session/usage-tracker.js';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection.ts';
 import { isRetryable, calculateDelay, sleep } from './retry.ts';
 import { ToolRegistry } from '../tools/tool-registry.ts';
+import type { LocalTraceRecorder } from '../trace/recorder.js';
 
 const MAX_STEPS = 150;
 const MAX_RETRIES = 3;
@@ -32,6 +33,7 @@ export async function agentLoop(
     usageTracker?: UsageTracker;  // 可选——记录每步的四类 token + cache 命中率
     modelInfo?: ModelInfo;    // 可选——不传时 usage cost 打 0
     cacheDisabled?: boolean;  // 可选——true 时 SYSTEM 前面加 nonce 破坏 cache（实验对照用）
+    trace?: LocalTraceRecorder;  // 可选——每 step 前后 emit step_started / step_completed
   },
 ) {
   let step = 0;
@@ -40,6 +42,7 @@ export async function agentLoop(
   const usageTracker = opts?.usageTracker;
   const modelInfo = opts?.modelInfo;
   const cacheDisabled = opts?.cacheDisabled === true;
+  const trace = opts?.trace;
 
   while (step < MAX_STEPS) {
     step++;
@@ -126,6 +129,13 @@ export async function agentLoop(
         const effectiveSystem = cacheDisabled
           ? `[cache-off nonce: step=${step} t=${Date.now()}]\n${system}`
           : system;
+
+        // Trace: step_started —— 快照 SYSTEM + messages（recorder 内部 sanitize + 序列化时天然深拷贝）
+        // **只在 attempt=1 时 emit**——重试不重复记 step_started、避免 trace 变形
+        if (trace && attempt === 1) {
+          await trace.recordStepStarted({ step, system: effectiveSystem, messages });
+        }
+
         const result = streamText({ model, system: effectiveSystem, tools: registry.toAISDKFormat(), messages, maxRetries: 0, onError: () => {} });
 
         for await (const part of result.fullStream) {
@@ -172,6 +182,7 @@ export async function agentLoop(
         stepProviderMetadata = await (result as any).providerMetadata;
         break;
       } catch (error) {
+        if (trace) await trace.recordAttemptError(step, attempt, error);
         if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
         const delay = calculateDelay(attempt);
         console.log(`  [重试] 第 ${attempt}/${MAX_RETRIES} 次失败，${delay}ms 后重试...`);
@@ -202,18 +213,30 @@ export async function agentLoop(
 
     // Cache 可视化：把 stepUsage 归一化成四类 token，记录到 UsageTracker
     // 只在 caller 传了 usageTracker + modelInfo 时才做——保持 agentLoop 的可选依赖
+    let normalizedUsage: ReturnType<typeof normalizeUsage> | null = null;
     if (usageTracker && modelInfo) {
-      const normalized = normalizeUsage(stepUsage, {
+      normalizedUsage = normalizeUsage(stepUsage, {
         provider: modelInfo.provider,
         providerMetadata: stepProviderMetadata,
       });
-      const rec = usageTracker.record(modelInfo.modelName, normalized);
+      const rec = usageTracker.record(modelInfo.modelName, normalizedUsage);
       // 命中率只算 miss + read 的比例——cacheWrite 是"投入"不算"命中"
       const denom = rec.inputTokens + rec.cacheReadTokens;
       const hit = denom > 0 ? Math.round(rec.cacheReadTokens / denom * 100) : 0;
       console.log(
         `  [Cache] hit ${hit}% · $${rec.cost.total.toFixed(4)} (baseline $${rec.cost.baseline.toFixed(4)})`,
       );
+    }
+
+    // Trace: step_completed —— 本 step 新增消息 + 输出文本 + usage
+    // 快照的是 stepResponse.messages（本 step 新增部分）、不是全量 messages——那已经在 step_started 里
+    if (trace) {
+      await trace.recordStepCompleted({
+        step,
+        text: fullText,
+        outputMessages: stepResponse!.messages,
+        usage: normalizedUsage ?? { inputTokens: inp, outputTokens: out, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: inp + out } as any,
+      });
     }
 
     const pct = Math.round(budget.used / budget.limit * 100);

@@ -51,6 +51,8 @@ import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
 import { createRagSearchTool } from './tools/rag-tools.ts';
 import { loadConfig } from './config/loader.ts';
 import type { SuperAgentConfig } from './config/schema.ts';
+import { LocalTraceRecorder } from './trace/recorder.ts';
+import { createTraceCommands } from './commands/trace.ts';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // createModel —— 根据 config 生成 model 实例、apiKey 缺失自动降级 mock
@@ -192,11 +194,21 @@ export async function startAgent() {
           sessionMessageCount: 0,
           sessionId: 'cron',
         });
+        // Trace: cron 每次 fire 一个 recorder、sessionId 用 'cron' 前缀便于筛选
+        const cronTracer = config.trace.enabled
+          ? await LocalTraceRecorder.start({
+              directory: config.trace.dir,
+              sessionId: 'cron',
+              model: modelInfo.modelName,
+            })
+          : null;
         const loopPromise = agentLoop(model, registry, cronMessages, dynamicSystem, cronBudget, {
           usageTracker,
           modelInfo,
           cacheDisabled: cacheState.disabled,
-        }).then(() => {
+          trace: cronTracer ?? undefined,
+        }).then(async () => {
+          await cronTracer?.finish('completed');
           const last = cronMessages[cronMessages.length - 1];
           if (!last || last.role !== 'assistant') return '(no reply)';
           return typeof last.content === 'string'
@@ -204,6 +216,9 @@ export async function startAgent() {
             : (Array.isArray(last.content)
               ? last.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
               : '(no reply)');
+        }).catch(async (err) => {
+          await cronTracer?.finish('failed', err);
+          throw err;
         });
         const timeoutPromise = new Promise<string>((_, reject) =>
           setTimeout(() => reject(new Error(`cron job timeout after ${timeout}ms`)), timeout));
@@ -280,6 +295,7 @@ export async function startAgent() {
     memoryDreamHandler,
     memoryListHandler,
     ...createCronCommands(cronService),
+    ...createTraceCommands(config.trace.dir),
     ...createTestSpawnCommands(getSpawnCtx),
     ...createAgentCommands(subAgentRegistry),
     ...createSecurityCommands(registry),
@@ -350,11 +366,34 @@ export async function startAgent() {
         sessionId: config.session.id,
       };
       const dynamicSystem = promptBuilder.build(promptCtx);
-      await agentLoop(model, registry, messages, dynamicSystem, budget, {
-        usageTracker,
-        modelInfo,
-        cacheDisabled: cacheState.disabled,
-      });
+
+      // Trace: 一个 REPL 任务一个 recorder
+      // enabled=false 时 tracer 为 null、agentLoop 不 emit、零开销
+      const tracer = config.trace.enabled
+        ? await LocalTraceRecorder.start({
+            directory: config.trace.dir,
+            sessionId: config.session.id,
+            model: (model as any)?.modelId || modelInfo.modelName,
+          })
+        : null;
+
+      try {
+        await agentLoop(model, registry, messages, dynamicSystem, budget, {
+          usageTracker,
+          modelInfo,
+          cacheDisabled: cacheState.disabled,
+          trace: tracer ?? undefined,
+        });
+        await tracer?.finish('completed');
+        if (tracer) console.log(`  [Trace] ${tracer.filePath}`);
+      } catch (error) {
+        // 不 throw——REPL 要继续跑、把错误告诉用户 + trace 存好 + 让下轮 ask 就绪
+        await tracer?.finish('failed', error);
+        console.error(`  [Agent] ${error instanceof Error ? error.message : String(error)}`);
+        if (tracer) console.log(`  [Trace] ${tracer.filePath}`);
+        ask();
+        return;
+      }
 
       for (let i = beforeCount; i < messages.length; i++) {
         store.append(messages[i]);

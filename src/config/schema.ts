@@ -58,6 +58,14 @@ export const UsageConfigSchema = z.object({
   trackingFile: z.string().default('.usage/today.jsonl'),
 });
 
+// Trace 系统：每次 agentLoop 一个 JSONL 文件、记录每 step 的输入上下文快照 + 输出
+// enabled: 关闭时完全不创建 recorder、零开销
+// dir: 落盘目录、按 traceId 命名（<sessionId>-<isoTimestamp>.jsonl）
+export const TraceConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  dir: z.string().default('.traces'),
+});
+
 export const SuperAgentConfigSchema = z.object({
   version: z.string().default('1.0'),
   model: ModelConfigSchema.default({}),
@@ -70,6 +78,7 @@ export const SuperAgentConfigSchema = z.object({
   cron: CronConfigSchema.default({}),
   session: SessionConfigSchema.default({}),
   usage: UsageConfigSchema.default({}),
+  trace: TraceConfigSchema.default({}),
 });
 
 export type SuperAgentConfig = z.infer<typeof SuperAgentConfigSchema>;

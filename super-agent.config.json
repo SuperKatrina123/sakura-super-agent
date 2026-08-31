@@ -32,5 +32,9 @@
   },
   "session": {
     "id": "default"
+  },
+  "trace": {
+    "enabled": true,
+    "dir": ".traces"
   }
 }
