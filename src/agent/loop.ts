@@ -94,18 +94,18 @@ export async function agentLoop(
     const afterSummarizeTokens = estimateTokens(messages);
 
     if (didAnything) {
-      console.log(`\n[压缩前] ${beforeCount} 条消息, ~${beforeTokens} tokens`);
+      // console.log(`\n[压缩前] ${beforeCount} 条消息, ~${beforeTokens} tokens`);
       if (cleared > 0) {
-        console.log(`[Layer 1: Microcompact] 清理了 ${cleared} 个工具结果, ~${afterMicroTokens} tokens`);
+        // console.log(`[Layer 1: Microcompact] 清理了 ${cleared} 个工具结果, ~${afterMicroTokens} tokens`);
       }
       if (summarizeResult.compressedCount > 0) {
-        console.log(`[Layer 2: Summarization] 压缩了 ${summarizeResult.compressedCount} 条消息, ~${afterSummarizeTokens} tokens`);
+        // console.log(`[Layer 2: Summarization] 压缩了 ${summarizeResult.compressedCount} 条消息, ~${afterSummarizeTokens} tokens`);
         // 摘要预览：只打前 100 字符，够看结构够看是否符合模板、不刷屏
         const preview = summarizeResult.summary.slice(0, 100).replace(/\n/g, ' ');
         const truncated = summarizeResult.summary.length > 100 ? '...' : '';
-        console.log(`[摘要预览] ${preview}${truncated}`);
+        // console.log(`[摘要预览] ${preview}${truncated}`);
       }
-      console.log(`[压缩后] ${messages.length} 条消息, ~${afterSummarizeTokens} tokens\n`);
+      // console.log(`[压缩后] ${messages.length} 条消息, ~${afterSummarizeTokens} tokens\n`);
     }
     // ─────────────────────────────────────────────────────────────────────
 

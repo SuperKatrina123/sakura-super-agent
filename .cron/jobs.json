@@ -1,0 +1,16 @@
+{
+  "jobs": [
+    {
+      "id": "chicken-soup-30s",
+      "name": "每30秒鸡汤",
+      "description": "每 30 秒输出一句随机鸡汤/名言",
+      "schedule": "every 30s",
+      "scheduleType": "interval",
+      "enabled": true,
+      "payload": { "type": "handler", "handler": "random-quote" },
+      "timeout": 60000,
+      "maxRetries": 3,
+      "source": "config"
+    }
+  ]
+}

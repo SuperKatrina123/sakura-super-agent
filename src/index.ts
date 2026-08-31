@@ -38,6 +38,8 @@ import { FeishuChannel } from './channels/feishu.ts';
 import { createChannelCommands } from './commands/channel.ts';
 import { createSecurityCommands } from './commands/security.ts';
 import { bashSecurityHook, auditLogHook } from './security/built-in-hooks.ts';
+import { CronService, type CronExecutor } from './cron/service.ts';
+import { createCronCommands } from './commands/cron.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -123,6 +125,13 @@ const feishuChannel = new FeishuChannel({
 });
 gateway.register(feishuChannel);
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Cron 定时任务
+// ═══════════════════════════════════════════════════════════════════════════
+// Agent 除了"被动接收消息"（REPL / channel），也要能"主动按时机执行"
+// 顶层实例化——exit 分支和 shutdown 都能引用；load/start 挪到 main() 里跑
+const cronService = new CronService('.');
+
 async function connectMCP() {
   const githubToken = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
 
@@ -202,6 +211,48 @@ async function main() {
   console.log(`\n启动 Channel...`);
   await gateway.startAll();
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Cron 定时任务
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Agent 除了"被动接收消息"（REPL / channel），也要能"主动按时机执行"
+  // executor 是 cron → agentLoop 的桥——每次 fire 都开一个独立 session、不污染主对话
+  // 独立 messages + 独立 budget、跟 [channel session] 隔离原则一致
+  console.log(`\n启动 Cron...`);
+  const cronExecutor: CronExecutor = {
+    runAgentPrompt: async (prompt: string, timeout = 60000) => {
+      const cronMessages: ModelMessage[] = [{ role: 'user', content: prompt }];
+      const cronBudget: BudgetState = { used: 0, limit: 600000 };
+      const dynamicSystem = promptBuilder.build({
+        toolCount: registry.getAll().length,
+        deferredTools: registry.getDeferredTools(),
+        sessionMessageCount: 0,
+        sessionId: 'cron',
+      });
+      // 用 Promise.race 实现超时——超时不 kill loop、只放弃等待、下轮继续
+      const loopPromise = agentLoop(model, registry, cronMessages, dynamicSystem, cronBudget, {
+        usageTracker,
+        modelInfo,
+        cacheDisabled: cacheState.disabled,
+      }).then(() => {
+        const last = cronMessages[cronMessages.length - 1];
+        if (!last || last.role !== 'assistant') return '(no reply)';
+        return typeof last.content === 'string'
+          ? last.content
+          : (Array.isArray(last.content)
+            ? last.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('')
+            : '(no reply)');
+      });
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error(`cron job timeout after ${timeout}ms`)), timeout));
+      return Promise.race([loopPromise, timeoutPromise]);
+    },
+    notify: (msg: string) => console.log(`  [cron notify] ${msg}`),
+  };
+  cronService.setExecutor(cronExecutor);
+  cronService.load();
+  cronService.start();
+  console.log(`  ✓ Cron 已启动`);
+
   // RAG 索引：启动时扫 docs/、chunk、embed、灌进 SQLite 三表
   // SQLite 持久化：进程退出后知识库还在、无需重新 embed
   // 用 DASHSCOPE_API_KEY 走真实 embedding、否则降级到 mock
@@ -241,10 +292,12 @@ async function main() {
   // Plugin 的 destroy 用于释放 DB 连接池、WebSocket、setInterval 等长生命周期资源
   // unloadAll 内部对每个 plugin 独立 try/catch——一个 destroy 出错不影响其他
   //
-  // **停机顺序**：channel → plugin → MCP
-  //   channel 里的 session 可能正在跑 agentLoop、里面会调 plugin/MCP 工具
-  //   channel 先停 → 不再有新请求进来 → plugin/MCP 才能安全清
+  // **停机顺序**：cron → channel → plugin → MCP
+  //   cron 里的 fire 会跑 agentLoop、里面会调 plugin / MCP 工具
+  //   channel 里的 session 同理
+  //   两者都是"loop 触发方"、必须先停、才能安全清 plugin/MCP
   const shutdown = async () => {
+    cronService.stop();
     await gateway.stopAll();
     await pluginManager.unloadAll();
     await registry.closeAllMCP();
@@ -349,6 +402,9 @@ const dispatcher = createDispatcher([
   memoryLintHandler,   // "memory lint" / "memory lint prune" 匹配、必须在裸 memory 之前
   memoryDreamHandler,  // "dream" / "memory dream"——Agent 自主整理记忆
   memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
+  // ── Cron 命令 ───────────────────────────────────────
+  // /cron / /cron list / /cron logs —— 查看定时任务与执行记录
+  ...createCronCommands(cronService),
   // ── Security 命令 ────────────────────────────────────
   // /role [owner|collaborator|guest] —— 切换角色、影响 registry.getActiveTools 过滤
   ...createSecurityCommands(registry),
@@ -372,6 +428,7 @@ function ask() {
         const trimmed = input.trim();
         if (!trimmed || trimmed === 'exit') {
             console.log('Bye!');
+            cronService.stop();               // 停调度器（清 setTimeout、不再 fire）
             await gateway.stopAll();          // 关闭所有 Channel（长连接、HTTP 服务器）
             await pluginManager.unloadAll();  // 释放 plugin 资源（DB 连接、订阅、定时器）
             rl.close();

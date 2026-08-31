@@ -17,6 +17,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.256",
     "better-sqlite3": "^13.0.3",
+    "croner": "^10.0.1",
     "dotenv": "^17.4.2",
     "jsdom": "^27.0.1",
     "sqlite-vec": "^0.1.9",

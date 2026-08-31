@@ -785,6 +785,78 @@ REPL `/hooks` 查看当前注册的 pre / post hook。
 
 更深的问题：**语法级分类防不住意图级危险**——`rm x.txt` 如果 x.txt 是关键配置、classifier 看不出来。教学项目接受这个粒度局限、生产需要"人类确认闸门"或"白名单严格模式"。
 
+## ⏰ Cron 定时任务
+
+> 📖 本节只是速览。完整设计（四个架构决策、跟 Channel 的主动/被动对偶、JSON+JSONL 双存储的哲学、四个维度的层次关系），见 [docs/cron-system-design.md](docs/cron-system-design.md)。
+
+**问题**：前面装的系统里 Agent 全是**被动响应**——REPL / channel / hook / tool 都要"有人叫才动"。真实需求里一大类是**主动的**——每天 9 点提醒日程、每 5 分钟看 CI、3 小时后 ping 我关空调。
+
+**方案**：给 Agent 装一个内嵌调度器——从"消息响应引擎"升级成"能自主行动的助手"。
+
+### 主动 vs 被动的第四维度
+
+跟前面的抽象呼应——**Cron 是第四个正交扩展维度**：
+
+| 维度 | 抽象 | 触发方式 |
+|---|---|---|
+| 能力 | Tool / Skill / Plugin | 被动被调用 |
+| 知识 | Memory / RAG | 被动被查询 |
+| 通道 | Channel | **被动**接收消息 |
+| **时机** | **Cron** | **主动**按时间触发 |
+
+**跟 Channel 的对偶关系**：
+```
+Channel:  外部消息 → Gateway.handleIncoming → agentLoop → 回复
+Cron:     内部定时 → Service.fire           → agentLoop → notify
+```
+
+**唯一区别是事件来源**——外部推 vs 内部拉、走 agentLoop 之后完全一样。
+
+### 四个架构决策
+
+**① 调度解析与执行分离**：`parser.ts` 只翻译"every 30s / cron 表达式 / ISO 时间"→ `ParsedSchedule`；`service.ts` 只调度和执行、拿到解析结果就 setTimeout。**加新调度语法只改 parser、service 完全不动**。
+
+**② 执行器接口注入**：`CronService` 不直接依赖 agentLoop，通过 `CronExecutor` 接口注入。测试友好（mock executor 一行）、可替换（想 curl/webhook 都行）、避免循环依赖。
+
+**③ JSON + JSONL 双存储**：
+- `jobs.json` —— **任务定义**、需要原子更新（POSIX rename 语义）、增删改整体写
+- `logs.jsonl` —— **执行日志**、只追加、崩溃安全、流式处理友好
+
+**存储格式跟数据更新模式匹配**——跟 Session / Memory 的选择同源。
+
+**④ 三层安全防护**：连续失败自动禁用（熔断）+ `source: 'config'|'runtime'` 区分（config 不可删）+ 权限系统联动（复用三层防线）。**Cron 是无人值守系统、必须有自动自愈能力**。
+
+### 两种 payload 类型
+
+```ts
+type JobPayload =
+  | { type: 'agent'; prompt: string }        // 走 executor → agentLoop
+  | { type: 'handler'; handler: string };    // 走内置注册表纯函数
+```
+
+**不是所有定时任务都需要 LLM**——"每 30 秒输出一句名言"用 handler 分支就行、烧 agentLoop 是浪费。**给"轻量任务"留一条不走 LLM 的路径**。
+
+### 停机顺序：cron → channel → plugin → MCP
+
+**依赖清理通用原则**：上游先停、下游后停。cron 和 channel 都是"loop 触发方"、必须先停；cron 又比 channel 更靠前——`clearTimeout` 瞬间同步、channel 关 WebSocket 需要等——**先停最快的、再等最慢的**。
+
+### REPL 命令
+
+```
+/cron              → 列出所有任务（含状态图标：⟳ running / ◉ scheduled / ○ disabled）
+/cron logs         → 最近 10 条执行记录
+```
+
+### 内置示范：`chicken-soup-30s`
+
+`.cron/jobs.json` 里预置一个 "每 30 秒输出一句名言" 的 handler 任务——启动后每 30 秒能看到：
+
+```
+[cron notify] [cron] ✓ 每30秒鸡汤: "The best way to predict the future is to invent it." —— Alan Kay
+```
+
+**这一层是 Agent 从"客服"进化到"助手"的分水岭**——没定时的 Agent 永远是"等你说话的仆人"、有了定时就能"自己动"。
+
 ## 快速开始
 
 ```bash
@@ -846,6 +918,11 @@ src/
 │   ├── bash-classifier.ts   # 正则三级分类（第二层：dangerous/moderate/safe）
 │   ├── hooks.ts             # HookPipeline pre/post（第三层：可观测 + 可扩展）
 │   └── built-in-hooks.ts    # bashSecurityHook + auditLogHook 内置示范
+├── cron/
+│   ├── types.ts             # CronJobConfig / ParsedSchedule / RunLog
+│   ├── parser.ts            # 调度解析（interval / cron 五字段 / ISO 一次性）
+│   ├── service.ts           # 调度 + 执行 + 熔断 + CronExecutor 接口注入
+│   └── store.ts             # jobs.json 原子写 + logs.jsonl 只追加
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -869,7 +946,8 @@ src/
 │   ├── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
 │   ├── plugin.ts            # /plugin list / load / unload
 │   ├── channel.ts           # /channel list
-│   └── security.ts          # /role list|owner|collaborator|guest、/hooks 查看当前 pre/post 钩子
+│   ├── security.ts          # /role list|owner|collaborator|guest、/hooks 查看当前 pre/post 钩子
+│   └── cron.ts              # /cron / /cron logs 查看定时任务与最近执行记录
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -891,6 +969,7 @@ docs/
 ├── plugin-system-design.md      # Plugin 系统（五个可迁移的架构决策 + PluginApi 隔离层）
 ├── channel-system-design.md     # Channel 系统（三个正交扩展维度、Session + budget 隔离、Plugin 扩展点前瞻）
 ├── security-design.md           # 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
+├── cron-system-design.md        # Cron 系统（主动 vs 被动的第四维度、四个架构决策、Agent 从"客服"到"助手"的分水岭）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 
