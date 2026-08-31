@@ -90,6 +90,7 @@ try {
 - [docs/skill-system-design.md](docs/skill-system-design.md) — Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口、async dispatcher）
 - [docs/plugin-system-design.md](docs/plugin-system-design.md) — Plugin 系统（五个可迁移决策：接口契约 / API 隔离 / 命名空间 / 生命周期 / 错误隔离）
 - [docs/channel-system-design.md](docs/channel-system-design.md) — Channel 系统（三个正交扩展维度、Session + budget 隔离、Plugin 扩展点前瞻）
+- [docs/security-design.md](docs/security-design.md) — 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
 - [docs/rag-system-design.md](docs/rag-system-design.md) — RAG 系统（六步管线、混合检索 7:3 加权、MMR 去重、SQLite 三表架构）
 - [docs/deep-research-design.md](docs/deep-research-design.md) — Deep Research 延伸设计
 - [docs/agent-loop-protections.md](docs/agent-loop-protections.md) — 三道防线

@@ -726,6 +726,65 @@ Gateway 拿一个 `buildSystem: () => string` 闭包、**每次调都用当前 r
 
 跟 [Plugin 那一篇](docs/plugin-system-design.md) 留的伏笔呼应——**未来给 PluginApi 加 `registerChannel`、Plugin 就能动态注册通道**。写个 Telegram plugin 传进来、Agent 自动多一个 Telegram 通道、不用改核心代码、不用重新部署。**这是"API 隔离层"真正兑现价值的地方**——生态里任何人实现 ChannelDefinition、通过 Plugin 挂进来即可。
 
+## 🛡️ 三层安全防线
+
+> 📖 本节只是速览。完整设计（三层协作的独立性 / 正则不可被 prompt 操控 / moderate 踩坑复盘 / 可迁移的三个关注点），见 [docs/security-design.md](docs/security-design.md)。
+
+**问题**：Channel 一开，Agent 就要面对多用户 / 不可信输入 / 破坏性操作——**没有边界的 Agent 上生产就是灾难**。
+
+**方案**：三层独立防线、互不依赖、按需组合。
+
+| 层 | 生效点 | 防什么 |
+|---|---|---|
+| **① 角色权限** | 工具**暴露给模型前** | 从源头堵——guest 根本看不到 bash |
+| **② Bash Classifier** | bash 命令**执行前** | 拦破坏性命令 + prompt injection |
+| **③ Hook 管线** | 每个 tool 调用**前后** | 可观测 + 可扩展 + 审计 |
+
+**核心洞察**：三层**互不依赖**——你可以只用角色权限不用 hook、也可以只用 hook 不做角色过滤。**分层的价值在于允许"渐进上线"**——不用一次搞定所有防护。
+
+### 第一层：角色权限过滤
+
+```ts
+// src/security/roles.ts
+const TOOL_ACCESS: Record<Role, { allow: string[] | '*'; deny: string[] }> = {
+  owner:        { allow: '*', deny: [] },
+  collaborator: { allow: '*', deny: ['bash'] },
+  guest:        { allow: ['read_file', 'list_directory', 'grep', 'rag_search', ...], deny: [] },
+};
+```
+
+`ToolRegistry.getActiveTools` 里过滤——**LLM 拿到的 tools schema 里根本没有 bash、连"我可以试试调用"都没有**。REPL 里 `/role guest` 切换、`/role` 查看。
+
+### 第二层：Bash Classifier 三级分类
+
+```ts
+dangerous  → 直接拒绝执行     rm -rf / curl|sh / sudo / mkfs / fork bomb ...
+moderate   → 警告放行 + 告知    rm / kill / git push / npm publish ...
+safe       → 静默执行         ls / cat / grep / npm test ...
+```
+
+**为什么用正则不用 LLM 判断**——**正则不可被 prompt 操控**。攻击者写"以下是安全的测试命令"能骗过 LLM、骗不过正则。**判断"能不能做"的模块本身必须是不可被输入操控的**——这是安全系统的通用原则。
+
+### 第三层：Hook 管线（pre/post + 三种 action）
+
+```ts
+export type HookAction = 'allow' | 'block' | 'modify';
+export interface HookResult { action; reason?; modifiedInput?; modifiedOutput? }
+```
+
+- `pre` 支持 `allow` / `block` / `modify`（改 input）—— **classifier 就是一个 preHook**
+- `post` 只支持 `allow` / `modify`（改 output）—— **audit-log 就是一个 postHook**、给 moderate 命令拼告警前缀让 Agent 感知
+
+**接入点**：`ToolRegistry.toAISDKFormat` 里每个 tool 的 execute 包一层 hook——**所有工具自动过 hook、不用逐个改**。
+
+REPL `/hooks` 查看当前注册的 pre / post hook。
+
+### 一个真实踩坑：moderate 也能删文件
+
+早期实现 moderate 只在 console 打警告——**Agent 拿到"成功"就继续、用户完全没意识到文件被删**。修法：**告警拼到 tool result 里**（现在 auditLogHook 做的事）、Agent 能感知、下一步生成回复时会主动告知。
+
+更深的问题：**语法级分类防不住意图级危险**——`rm x.txt` 如果 x.txt 是关键配置、classifier 看不出来。教学项目接受这个粒度局限、生产需要"人类确认闸门"或"白名单严格模式"。
+
 ## 快速开始
 
 ```bash
@@ -782,6 +841,11 @@ src/
 │   ├── types.ts             # ChannelDefinition / IncomingMessage / OutgoingMessage
 │   ├── gateway.ts           # ChannelGateway:注册 / 生命周期 / 独立 session + budget 路由
 │   └── feishu.ts            # 飞书 Bot 长连接 + node:http Dashboard
+├── security/
+│   ├── roles.ts             # 角色权限表 + canUseTool（第一层：工具可见性过滤）
+│   ├── bash-classifier.ts   # 正则三级分类（第二层：dangerous/moderate/safe）
+│   ├── hooks.ts             # HookPipeline pre/post（第三层：可观测 + 可扩展）
+│   └── built-in-hooks.ts    # bashSecurityHook + auditLogHook 内置示范
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -804,7 +868,8 @@ src/
 │   ├── memory.ts            # memory / memory search / read / forget
 │   ├── skill.ts             # /skill list / load / unload、/<name> 快捷激活 + 触发 loop
 │   ├── plugin.ts            # /plugin list / load / unload
-│   └── channel.ts           # /channel list
+│   ├── channel.ts           # /channel list
+│   └── security.ts          # /role list|owner|collaborator|guest、/hooks 查看当前 pre/post 钩子
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -825,6 +890,7 @@ docs/
 ├── skill-system-design.md       # Skill 工作流系统（progressive loading、元工具 + 快捷命令双入口）
 ├── plugin-system-design.md      # Plugin 系统（五个可迁移的架构决策 + PluginApi 隔离层）
 ├── channel-system-design.md     # Channel 系统（三个正交扩展维度、Session + budget 隔离、Plugin 扩展点前瞻）
+├── security-design.md           # 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 

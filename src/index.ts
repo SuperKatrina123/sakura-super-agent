@@ -36,6 +36,8 @@ import { createPluginCommands } from './commands/plugin.ts';
 import { ChannelGateway } from './channels/gateway.ts';
 import { FeishuChannel } from './channels/feishu.ts';
 import { createChannelCommands } from './commands/channel.ts';
+import { createSecurityCommands } from './commands/security.ts';
+import { bashSecurityHook, auditLogHook } from './security/built-in-hooks.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -57,6 +59,12 @@ const rl = createInterface({
 
 const registry = new ToolRegistry();
 registry.register(...allTools, pickSearchTool());
+
+// 注册内置 hook —— 三层安全防线的第三层
+// 顺序即执行顺序：pre 里越先注册越先跑、post 同理
+// 这里 bashSecurityHook 是拦截（dangerous block）、auditLogHook 是可观测（moderate 告警拼进 output）
+registry.hooks.registerPre('bash-security', bashSecurityHook);
+registry.hooks.registerPost('audit-log', auditLogHook);
 
 // MemoryStore：跨会话记忆——.memory/ 目录下的索引 + 分散 markdown 文件
 // 挂在项目根：跟着项目走、可 commit 到 git
@@ -341,6 +349,9 @@ const dispatcher = createDispatcher([
   memoryLintHandler,   // "memory lint" / "memory lint prune" 匹配、必须在裸 memory 之前
   memoryDreamHandler,  // "dream" / "memory dream"——Agent 自主整理记忆
   memoryListHandler,   // 裸 "memory" 放最后——避免抢走带参数的命令
+  // ── Security 命令 ────────────────────────────────────
+  // /role [owner|collaborator|guest] —— 切换角色、影响 registry.getActiveTools 过滤
+  ...createSecurityCommands(registry),
   // ── Plugin 命令 ─────────────────────────────────────
   // /plugin / /plugin list / /plugin load <name> / /plugin unload <name>
   // handler 数组内部已按顺序排好：load / unload 先匹配、list 兜底

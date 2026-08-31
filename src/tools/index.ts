@@ -321,6 +321,10 @@ export const bashTool: ToolDefinition = {
   isReadOnly: false,
   maxResultChars: 3000,
   execute: async ({ command }) => {
+    // ── 安全检查已上移到 registry.hooks.runPre（bash-security preHook）──
+    // 这里只关心"执行"——分类 / 拦截 / 告警都由 hook 处理
+    // hook 拿到"[⚠️ security warning] ..." 前缀会拼进 tool 返回值、Agent 能感知
+
     // 先检测环境是否支持 child_process
     try {
       execSync('echo test', { stdio: 'ignore' });

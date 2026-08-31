@@ -1,4 +1,6 @@
 import { jsonSchema } from 'ai';
+import { canUseTool, type Role } from '../security/roles.js';
+import { HookPipeline } from '../security/hooks.js';
 
 export interface ToolDefinition {
   name: string;
@@ -41,10 +43,23 @@ export class ToolRegistry {
     // 精确匹配后加入这个 Set，从此该工具对模型"可见"（进 prompt + 可调用）
     private discoveredTools = new Set<string>();
 
+    // 当前角色——控制 getActiveTools 过滤
+    // MVP：全局状态、REPL /role 命令切换。未来接 channel 时按 sender 独立
+    // 默认 owner——本地开发全权限、外部 channel 接入时再收紧
+    private currentRole: Role = 'owner';
+
     // 三个状态变量构成一把读写锁
     private exclusiveLock = false;          // 当前是否有独占锁持有者
     private concurrentCount = 0;            // 当前共享锁持有数
     private waitQueue: Array<() => void> = [];  // 阻塞等待中的 resolve 函数
+
+    setRole(role: Role): void { this.currentRole = role; }
+    getRole(): Role { return this.currentRole; }
+
+    // 三层安全防线的第三层——hook 管线
+    // 每个工具执行前后统一走它、可观测性 + 可扩展性、不影响"能不能执行"（那由 role + classifier 管）
+    // 生产场景：审计日志、格式检查、参数改写、结果脱敏
+    readonly hooks = new HookPipeline();
 
     register(...tools: ToolDefinition[]): void {
         for (const tool of tools) {
@@ -148,9 +163,14 @@ export class ToolRegistry {
 
     // 当前对模型可见的工具集：eager + 已发现的 defer + tool_search 自身
     // toAISDKFormat 只序列化这里返回的工具，defer 工具的 schema 不进 prompt
+    //
+    // 过滤两层：
+    //   ① defer 且未 discovered → 藏起来（省 tokens、由 tool_search 按需激活）
+    //   ② role 不允许 → 藏起来（安全：模型根本看不到、不会尝试调）
     getActiveTools(): ToolDefinition[] {
         return this.getAll().filter(tool => {
             if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) return false;
+            if (!canUseTool(this.currentRole, tool.name)) return false;
             return true;
         });
     }
@@ -242,6 +262,18 @@ export class ToolRegistry {
                 description: tool.description,
                 inputSchema: jsonSchema(tool.parameters as any),
                 execute: async (input: any) => {
+                // ── Hook Pre ──
+                // 三层防线的第三层：任何 tool 调用前统一过 preHook
+                // 拦截语义（block）在这里生效——比如 bash-classifier hook 挡 dangerous 命令
+                // 也支持 modify 语义——比如 hook 可以改写参数（脱敏 / 归一化）
+                const pre = await registry.hooks.runPre(name, input);
+                if (pre.action === 'block') {
+                  return `[security] tool "${name}" 被 hook 拦截：${pre.reason ?? '未说明原因'}`;
+                }
+                const finalInput = pre.action === 'modify' && pre.modifiedInput !== undefined
+                  ? pre.modifiedInput
+                  : input;
+
                 // 在真正执行前先按 isConcurrencySafe 获取锁
                 if (isSafe) {
                     await registry.acquireConcurrent();
@@ -251,8 +283,11 @@ export class ToolRegistry {
                     // console.log(`  [串行] ${name} 获取独占锁，等待其他工具完成`);
                 }
                 try {
-                    const raw = await executeFn(input);
-                    const text = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+                    const raw = await executeFn(finalInput);
+                    // ── Hook Post ──
+                    // 结果处理：审计 / 脱敏 / 格式化——post 只支持 modify、不支持 block
+                    const modified = await registry.hooks.runPost(name, finalInput, raw);
+                    const text = typeof modified === 'string' ? modified : JSON.stringify(modified, null, 2);
                     return truncateResult(text, maxChars);
                 } finally {
                     // 不管成功还是抛异常，锁都要释放
