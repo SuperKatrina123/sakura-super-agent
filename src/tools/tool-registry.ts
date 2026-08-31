@@ -302,6 +302,50 @@ export class ToolRegistry {
         }
         return result;
     }
+
+    // 给 sub-agent 用的变体：**不加读写锁** + 支持排除清单
+    //
+    // 为什么 sub 不能走 main 的锁：
+    //   - main 的锁是"跨 tool call"的——独占 tool 跑的时候、别人都得等
+    //   - sub 跟 main 共享 registry、共享同一把锁——**main 里有独占 tool 时、sub 会被卡死**
+    //   - 更糟：sub 里跑独占 tool 会挡住 main 的下一步——反向死锁
+    //   - 解决：sub 完全绕开锁、独立执行——反正 sub 是**独立进程语义**、上下文/messages 都独立
+    //
+    // 为什么要排除清单：
+    //   - sub 不该 spawn sub（当前 maxSpawnDepth = 1 已经防了、但 tool 层再挡一次更清晰）
+    //   - 生产可以扩展："这个 sub 只能用 read_file / grep、不给 bash"——按需过滤
+    //
+    // 仍然走 hooks——**安全防线不能因为是 sub 就跳过**、bash-classifier 在 sub 里同样生效
+    toAISDKFormatUnlocked(excluded: Set<string> = new Set()): Record<string, any> {
+        const result: Record<string, any> = {};
+        for (const tool of this.getActiveTools()) {
+            if (excluded.has(tool.name)) continue;
+            const name = tool.name;
+            const maxChars = tool.maxResultChars;
+            const executeFn = tool.execute;
+            const registry = this;
+            result[name] = {
+                description: tool.description,
+                inputSchema: jsonSchema(tool.parameters as any),
+                execute: async (input: any) => {
+                    // Hook Pre——安全 / 审计不能跳
+                    const pre = await registry.hooks.runPre(name, input);
+                    if (pre.action === 'block') {
+                        return `[security] tool "${name}" 被 hook 拦截：${pre.reason ?? '未说明原因'}`;
+                    }
+                    const finalInput = pre.action === 'modify' && pre.modifiedInput !== undefined
+                        ? pre.modifiedInput : input;
+                    // 不加锁——直接 execute
+                    const raw = await executeFn(finalInput);
+                    // Hook Post
+                    const modified = await registry.hooks.runPost(name, finalInput, raw);
+                    const text = typeof modified === 'string' ? modified : JSON.stringify(modified, null, 2);
+                    return truncateResult(text, maxChars);
+                },
+            };
+        }
+        return result;
+    }
 }
 
 export function truncateResult(text: string, maxChars: number = DEFAULT_MAX_RESULT_CHARS): string {

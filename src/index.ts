@@ -40,6 +40,11 @@ import { createSecurityCommands } from './commands/security.ts';
 import { bashSecurityHook, auditLogHook } from './security/built-in-hooks.ts';
 import { CronService, type CronExecutor } from './cron/service.ts';
 import { createCronCommands } from './commands/cron.ts';
+import { SubAgentRegistry } from './agents/registry.ts';
+import { createSpawnTool } from './tools/spawn-tools.ts';
+import type { SpawnContext } from './agents/spawn.ts';
+import { createTestSpawnCommands } from './commands/test-spawn.ts';
+import { createAgentCommands } from './commands/agent.ts';
 import { buildSqliteIndex } from './rag/build-sqlite.ts';
 import { SqliteVectorStore } from './rag/sqlite-store.ts';
 import { createMockEmbedder, createDashScopeEmbedder } from './rag/embedder.ts';
@@ -81,6 +86,29 @@ skillLoader.load();
 registry.register(createToolSearchTool(registry));
 registry.register(createMemoryTool(memoryStore));
 registry.register(createSkillLoadTool(skillLoader));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SubAgent 系统
+// ═══════════════════════════════════════════════════════════════════════════
+// 主 Agent 通过 spawn_agent 元工具派子 Agent 去执行任务
+// 独立 messages + 独立 budget + 独立锁——**几万 tokens 探索、压缩成几百 tokens 结论回主**
+//
+// getSpawnCtx 是 closure——每次调用都拿"当前"registry / buildSystem
+// 之所以是 getter 而不是直接传实例：spawn_agent 注册时 promptBuilder 还没到位、闭包延迟解析
+const subAgentRegistry = new SubAgentRegistry();
+const getSpawnCtx = (): SpawnContext => ({
+  model,
+  registry,
+  agentRegistry: subAgentRegistry,
+  buildSystem: () => promptBuilder.build({
+    toolCount: registry.getAll().length,
+    deferredTools: registry.getDeferredTools(),
+    sessionMessageCount: 0,
+    sessionId: 'subagent',
+  }),
+  currentDepth: 0,   // 主 Agent 派 sub 时深度为 0、canSpawn 会 +1 后跟 maxSpawnDepth 比
+});
+registry.register(createSpawnTool(subAgentRegistry, getSpawnCtx));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Plugin 系统
@@ -405,6 +433,12 @@ const dispatcher = createDispatcher([
   // ── Cron 命令 ───────────────────────────────────────
   // /cron / /cron list / /cron logs —— 查看定时任务与执行记录
   ...createCronCommands(cronService),
+  // ── Test 命令 ───────────────────────────────────────
+  // /test-spawn / /test-spawn single —— 直调 spawn 路径、跳过模型选择工具的不确定性
+  ...createTestSpawnCommands(getSpawnCtx),
+  // ── SubAgent 命令 ───────────────────────────────────
+  // /agents —— 查看子 Agent 运行记录（活跃 / 完成 / 失败 + 配置）
+  ...createAgentCommands(subAgentRegistry),
   // ── Security 命令 ────────────────────────────────────
   // /role [owner|collaborator|guest] —— 切换角色、影响 registry.getActiveTools 过滤
   ...createSecurityCommands(registry),

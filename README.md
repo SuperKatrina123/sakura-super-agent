@@ -857,6 +857,78 @@ type JobPayload =
 
 **这一层是 Agent 从"客服"进化到"助手"的分水岭**——没定时的 Agent 永远是"等你说话的仆人"、有了定时就能"自己动"。
 
+## 🤖 SubAgent 系统
+
+> 📖 本节只是速览。完整设计（隔离的本质、六个设计点、结果回传三种业界做法、"模型不一定会用 spawn_agent"怎么解），见 [docs/subagent-system-design.md](docs/subagent-system-design.md)。
+
+**问题**：前面所有系统都在打造**"一个更强的 Agent"**——但归根结底还是**一个**。三个真实场景单 Agent 扛不住：
+- **上下文装不下**：调研三个大项目、单 Agent 累积十几万 tokens 后开始压缩丢细节
+- **需要并行提效**：三个独立任务只能串行、总耗时 = sum
+- **需要隔离危险操作**：实验性重构、改坏了主对话难撤
+
+**方案**：主 Agent 可以派子 Agent——**独立 messages + 独立 loop、结果压缩回传**。
+
+### 隔离的本质：同进程 + 独立上下文
+
+**一行代码搞定隔离**：
+```ts
+const messages: ModelMessage[] = [{ role: 'user', content: request.task }];
+```
+
+sub 拿到全新的空 messages 数组、里面只有一条 user 消息——**父 Agent 的对话历史、工具调用记录、sub 一概看不到**。
+
+三种业界隔离方式的取舍：
+
+| 方式 | 我们 | git worktree | 独立进程 |
+|---|---|---|---|
+| 隔离级别 | 同进程 + 独立 messages | 独立文件系统（worktree） | 独立内存空间 |
+| 用于 | context 隔离、并行调研 | 破坏性代码改动 | 长跑 / 独立文件操作 |
+| 例子 | Claude Code 内置 | Claude Code `isolation: 'worktree'` | Claude Code Swarm 模式 |
+
+**我们够用**——教学场景是"并行调研 / 分而治之"、不需要 worktree / 独立进程。
+
+### 六个执行隔离设计点
+
+- **独立 messages** —— 一行代码 = 独立 context 窗口
+- **EXCLUDED_TOOLS** —— sub 不能再派 sub（深度防御第一层）
+- **`toAISDKFormatUnlocked`** —— 不加读写锁（父 Agent 的锁还持有、sub 走同一把锁会死锁）；但**hooks 依然走**
+- **最后一步强制文字** —— `toolChoice: 'none'`（API 硬约束）+ prompt 引导（软引导）
+- **彩色 tag** —— Agent-1 cyan / Agent-2 yellow / Agent-3 magenta、并发日志可读
+- **AbortController 超时** —— 60s 保底、超时时**提取部分结果**（部分成功 > 完全失败）
+
+### 两道保护
+
+```ts
+maxSpawnDepth: 1      // 深度限制、防垂直爆炸（一条链无限深）
+maxConcurrent: 3      // 并发限制、防水平爆炸（一层无限宽）
+```
+
+两道独立、组合起来是完整的资源边界。
+
+### 结果回传：三种业界做法
+
+- **我们 / Claude Code 同步注入** —— sub 输出作为工具返回值、直接进父 messages、最简单
+- **OpenClaw Announce Queue** —— 队列 + 1s 防抖 + 指数退避、防止多 sub 完成时频繁打断
+- **OpenCode 分阶段编排** —— 阶段 1 并行 Explore、阶段 2 切回串行、"先散后收"
+
+我们够用、真实需求变了再升。
+
+### function calling 就是意图检测
+
+**测试实录**：让 Agent"并行查 React/Vue/Solid"——**没走 spawn_agent、直接调了 3 次 web_search**。原因：**模型倾向心智负担更低的路径**。
+
+**很多产品做"路由分类器"是白花力气的**——function calling 本身就是最自然的意图检测机制、**只不过检测器是模型自身**。**修法**：把 spawn_agent 的 description 写清"何时用 / 何时不用"、画清跟 web_search 的边界；SYSTEM 里加一句引导。**Description 就是 mini-prompt**——**新提示工程时代**、菜单写不清模型点错菜。
+
+### 两个入口 + 一条测试路径
+
+- **`spawn_agent` 元工具** —— LLM 主动派、支持 `task` 单任务或 `tasks` 数组并行
+- **`/agents` REPL** —— 查看子 Agent 运行记录（活跃 / 完成 / 失败 + 配置）
+- **`/test-spawn` REPL** —— 跳过模型不确定性、直接跑架构、验证接线通不通
+
+### SubAgent 是从"一个"到"一群"的分水岭
+
+前面所有系统都在打造"一个更强的 Agent"——**subAgent 让 Agent 从助手变成了"能带团队的团队 leader"**。
+
 ## 快速开始
 
 ```bash
@@ -896,6 +968,7 @@ src/
 │   ├── memory-tools.ts      # 元工具 memory:跨会话记忆（save/list/search/read/delete）
 │   ├── skill-tools.ts       # 元工具 skill_load:激活 skill、下轮 SYSTEM 注入完整 body
 │   ├── rag-tools.ts         # 元工具 rag_search：SQLite 三表混合检索
+│   ├── spawn-tools.ts       # 元工具 spawn_agent：LLM 主动派子 Agent（single / parallel）
 │   └── simulated-mcp.ts     # 模拟 MCP 工具（Notion/Browser/Supabase，演示工具膨胀）
 ├── mcp/
 │   ├── client.ts            # 手写 stdio MCP client（教学载体）
@@ -923,6 +996,10 @@ src/
 │   ├── parser.ts            # 调度解析（interval / cron 五字段 / ISO 一次性）
 │   ├── service.ts           # 调度 + 执行 + 熔断 + CronExecutor 接口注入
 │   └── store.ts             # jobs.json 原子写 + logs.jsonl 只追加
+├── agents/
+│   ├── types.ts             # SubAgentConfig / SpawnRequest / SubAgentRun
+│   ├── registry.ts          # SubAgentRegistry: canSpawn + 状态跟踪 + maxSpawnDepth/maxConcurrent
+│   └── spawn.ts             # spawnAgent / spawnParallel: 独立 messages + 独立 loop + 彩色 tag + 超时兜底
 ├── rag/
 │   ├── chunker.ts           # 递归段落分块（~256 tokens、含中文兼容）
 │   ├── embedder.ts          # Embedding 抽象层（Mock / DashScope 可插拔）
@@ -947,7 +1024,9 @@ src/
 │   ├── plugin.ts            # /plugin list / load / unload
 │   ├── channel.ts           # /channel list
 │   ├── security.ts          # /role list|owner|collaborator|guest、/hooks 查看当前 pre/post 钩子
-│   └── cron.ts              # /cron / /cron logs 查看定时任务与最近执行记录
+│   ├── cron.ts              # /cron / /cron logs 查看定时任务与最近执行记录
+│   ├── agent.ts             # /agents 查看子 Agent 运行记录（活跃/完成/失败 + 配置）
+│   └── test-spawn.ts        # /test-spawn 直调 spawnParallel、跳过模型选择的不确定性
 └── context/
     ├── prompt-builder.ts    # Prompt Pipe 核心：PipeFn + build + debug
     ├── segments.ts          # 纯 ctx segment（coreRules / toolGuide / deferredTools / sessionContext）
@@ -970,6 +1049,7 @@ docs/
 ├── channel-system-design.md     # Channel 系统（三个正交扩展维度、Session + budget 隔离、Plugin 扩展点前瞻）
 ├── security-design.md           # 三层安全防线（角色权限 / Bash Classifier / Hook 管线 —— 各解决一个正交问题）
 ├── cron-system-design.md        # Cron 系统（主动 vs 被动的第四维度、四个架构决策、Agent 从"客服"到"助手"的分水岭）
+├── subagent-system-design.md    # SubAgent 系统（隔离本质 / 六个执行设计点 / 结果回传三种做法 / description 就是 mini-prompt）
 └── rag-system-design.md         # RAG 系统（六步管线、混合检索 7:3、MMR 去重、SQLite 三表）
 ```
 
